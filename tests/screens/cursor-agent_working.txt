@@ -1,0 +1,39 @@
+  │                                                                                              │
+  │  Do you trust the contents of this directory?                                                │
+  │                                                                                              │
+  │    /private/tmp/claude-501/-Users-ahmetilten-tmux-phone/dd0eceb0-fe34-4c6c-84e8-7bbfb86f3d7  │
+  │    5/scratchpad/work                                                                         │
+  │                                                                                              │
+  │                                                                                              │
+  │    [a] Trust this workspace                                                                  │
+  │    [q] Quit                                                                                  │
+  │                                                                                              │
+  │  ⏳ Trusting workspace...                                                                    │
+  │                                                                                              │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  Cursor Agent
+  v2026.10.16-e3cb207
+  Tip: Use /debug to instrument and debug complex problems.
+
+
+  Write a two sentence poem about tmux, then run the shell command: curl -sI
+  https://example.com | head -1
+
+
+  A quick ode to tmux, then checking that header for you.
+
+  $ curl -sI https://example.com | head -1 0ms
+    HTTP/2 200
+
+ ⠠⠜ Running  39 tokens
+    Tip: Hit shift+tab to enable Plan Mode for large or complex changes.
+ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+  → Add a follow-up                                                                 ctrl+c to stop
+ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  1 task
+  Muse Wonder 300K High                                                Run Everything -- INSERT --
+  /private/tmp/claude-501/-Users-ahmetilten-tmux-phone/dd0eceb0-fe34-4c6c-84e8-7bbfb86f3d75/scratch
+  pad/work · main
+

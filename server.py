@@ -59,7 +59,17 @@ PANE_FIELDS = ["pane_id", "window_id", "window_index", "window_name", "pane_inde
 RULE = re.compile(r"^\s*─{8,}")
 BULLET = re.compile(r"^[⏺●•] ")
 CLAUDE_NOTICE = re.compile(r"new task\? /clear|Compacted\s+while\s+idle|^[⏺●•] Compacted\b|0: Dismiss\s*$|^\s*1: Learn more\s*$")
-SPINNER = re.compile(r"^[✻✶✳✢✽·*+] \S.*…")
+# Claude Code's spinner line ("✻ Thinking…"), or Cursor's (" ⠰⠳ Working").
+SPINNER = re.compile(r"^[✻✶✳✢✽·*+] \S.*…|^ [⠀-⣿]+ \S")
+# The coding agents a pane can run, by process name. For each: its input box, matched against a line and the
+# next one joined by "\n", and a line it shows while it works.
+# Claude Code: a rule, then the ❯ line. Cursor: a bar of ▄, then the → line. Codex: the › line, with no rule.
+INPUT_BOX = {"claude": re.compile(r"\s*─{8,}.*\n\s*❯"), "cursor-agent": re.compile(r"\s*▄{8,}.*\n\s*→"),
+             "codex": re.compile(r"›(\s|$)")}
+WORKING = {"claude": SPINNER, "cursor-agent": re.compile(r"ctrl\+c to stop\s*$"), "codex": re.compile(r"to interrupt\)")}
+# Claude Code and Cursor hide the input box while they ask you something. Codex keeps its › line, so its
+# question or approval is known by the hint under it.
+CODEX_ASK = re.compile(r"to confirm\b|to submit (answer|all)\b|enter continue")
 
 
 class TmuxError(Exception):
@@ -159,28 +169,30 @@ def sessions_for_phone(target):
             for s in list_sessions() if s["session_name"] != VIEWER]
 
 
-def claude_ttys():
-    """ttys whose foreground process is Claude Code."""
+def agent_ttys():
+    """tty -> the coding agent in its foreground: "claude", "codex" or "cursor-agent"."""
     out = subprocess.run(["ps", "-A", "-o", "tty=,stat=,comm="], capture_output=True, text=True, env={"LC_ALL": "C"}).stdout
-    return {parts[0] for parts in (line.split(None, 2) for line in out.splitlines())
-            if len(parts) == 3 and "+" in parts[1] and os.path.basename(parts[2]) == "claude"}
+    return {parts[0]: os.path.basename(parts[2]) for parts in (line.split(None, 2) for line in out.splitlines())
+            if len(parts) == 3 and "+" in parts[1] and os.path.basename(parts[2]) in INPUT_BOX}
 
 
-def body_end(lines):
-    """Index of the rule above Claude's input box; everything below it is prompt and footer."""
+def body_end(lines, agent):
+    """Index of the top of the agent's input box; everything from there down is prompt and footer."""
     for i in range(len(lines) - 2, -1, -1):
-        if RULE.match(lines[i]) and lines[i + 1].lstrip().startswith("❯"):
+        if INPUT_BOX[agent].match(lines[i] + "\n" + lines[i + 1]):
             return i
     return len(lines)
 
 
-def last_line(lines):
-    lines = lines[:body_end(lines)]
-    content = [l for l in lines if l.strip() and not RULE.match(l) and not CLAUDE_NOTICE.search(l)]
+def last_line(lines, agent):
+    lines = lines[:body_end(lines, agent)]
+    # A line with no letter or digit is blank or a box border.
+    content = [l for l in lines if re.search(r"\w", l) and not RULE.match(l) and not CLAUDE_NOTICE.search(l)]
     spinner = next((l.strip() for l in content[-4:] if SPINNER.match(l)), None)
     if spinner:
         return spinner
-    # Otherwise the start of Claude's latest reply, rejoined across its wrapped lines.
+    # Otherwise the start of the latest reply, rejoined across its wrapped lines. Claude Code and Codex start
+    # each reply with a bullet; Cursor does not, so for Cursor this is mostly the last line above the box.
     for i in range(len(lines) - 1, -1, -1):
         if BULLET.match(lines[i]) and not CLAUDE_NOTICE.search(lines[i]):
             parts = [lines[i][2:].strip()]
@@ -192,11 +204,12 @@ def last_line(lines):
     return content[-1].strip() if content else ""
 
 
-def status(lines):
-    end = body_end(lines)
-    if end == len(lines):
+def status(lines, agent):
+    end = body_end(lines, agent)
+    if end == len(lines) or agent == "codex" and any(CODEX_ASK.search(l) for l in lines[end:]):
         return "needs_you"  # no input box on screen means a question or menu is open
-    if any(SPINNER.match(l) for l in lines[:end][-30:]):
+    # The two lines at the top of the box too: Cursor shows "ctrl+c to stop" in its → line.
+    if any(WORKING[agent].search(l) for l in lines[:end + 2][-30:]):
         return "working"
     return "idle"
 
@@ -204,12 +217,12 @@ def status(lines):
 def list_panes():
     # The viewer's panes, which are the target session's, each once: `list-panes -a` would list a grouped window once per session.
     out = tmux("list-panes", "-s", "-t", f"={VIEWER}", "-F", "\x1f".join(f"#{{{f}}}" for f in PANE_FIELDS))
-    claude = claude_ttys()
+    agents = agent_ttys()
     panes = []
     for row in out.splitlines():
         p = dict(zip(PANE_FIELDS, row.split("\x1f")))
         lines = tmux("capture-pane", "-p", "-t", p["pane_id"]).rstrip().splitlines()
-        is_claude = p["pane_tty"].removeprefix("/dev/") in claude
+        agent = agents.get(p["pane_tty"].removeprefix("/dev/"))
         panes.append({
             "id": p["pane_id"].lstrip("%"),
             "window": int(p["window_index"]),
@@ -221,8 +234,8 @@ def list_panes():
             # The app reads the mouse, so tmux hands it the wheel; if not, the wheel scrolls tmux's copy mode.
             "reads_mouse": p["mouse_any_flag"] == "1",
             "border": border_row(p),
-            "status": status(lines) if is_claude else None,
-            "last_line": last_line(lines) if is_claude else next((l.strip() for l in reversed(lines) if l.strip()), ""),
+            "status": status(lines, agent) if agent else None,
+            "last_line": last_line(lines, agent) if agent else next((l.strip() for l in reversed(lines) if l.strip()), ""),
         })
     return panes
 
