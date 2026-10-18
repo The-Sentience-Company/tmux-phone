@@ -27,8 +27,8 @@
   /* Header buttons read as [Label]. Pressed or armed shows in reverse video. */
   button { font: inherit; color: var(--fg); background: none; border: 0; border-radius: 0; padding: 0 6px;
     min-height: 40px; cursor: pointer; }
-  header button::before, .br::before, .bar button::before { content: "["; color: var(--dim); }
-  header button::after, .br::after, .bar button::after { content: "]"; color: var(--dim); }
+  header button::before, .br::before, .bar button::before, #photo-menu button::before { content: "["; color: var(--dim); }
+  header button::after, .br::after, .bar button::after, #photo-menu button::after { content: "]"; color: var(--dim); }
   button:active, button.armed { background: var(--fg); color: var(--bg); }
   button:active::before, button:active::after, button.armed::before, button.armed::after { color: inherit; }
   button:disabled { color: var(--dim); }
@@ -70,12 +70,17 @@
   .bar { display: flex; overflow-x: auto; border-top: 1px solid var(--line); flex-shrink: 0; scrollbar-width: none; }
   .bar::-webkit-scrollbar { display: none; }
   /* The key bar is one row of short glyphs in three groups, split by dim bars. */
-  .bar { align-items: center; }
-  .bar button { flex-shrink: 0; min-height: 44px; padding: 0 3px; white-space: nowrap; }
+  .bar { align-items: center; gap: 6px; padding: 0 4px; }
+  .bar button { flex-shrink: 0; min-height: 44px; padding: 0 7px; white-space: nowrap; }
   .bar .input { color: var(--cyan); }
   .bar .mod { color: var(--yellow); }
   .bar button:active, .bar button.armed { background: var(--fg); color: var(--bg); }
-  .bar .sep { flex-shrink: 0; color: var(--line); padding: 0 1px; user-select: none; -webkit-user-select: none; }
+  .bar .sep { flex-shrink: 0; color: var(--line); padding: 0; user-select: none; -webkit-user-select: none; }
+  /* Photo opens [paste] [library] in a row just above the key bar, over the bottom of the terminal. */
+  #keys { position: relative; flex-shrink: 0; }
+  #photo-menu { position: absolute; bottom: 100%; left: 0; display: flex; gap: 6px; padding: 0 4px; background: var(--bg);
+    border: 1px solid var(--line); border-left: 0; border-bottom: 0; z-index: 6; }
+  #photo-menu button { min-height: 44px; padding: 0 7px; color: var(--cyan); }
   #mic.recording { background: var(--red); color: var(--bg); }
   #mic.recording::before, #mic.recording::after { color: inherit; }
   .icon { width: 20px; height: 20px; vertical-align: middle; fill: none; stroke: currentColor; stroke-width: 2; }
@@ -106,6 +111,8 @@
     <button id="close-pane" class="danger">Close</button>
   </header>
   <div id="term-wrap"><div id="term"></div><div id="term-status" class="hidden">[reconnecting…]</div></div>
+  <div id="keys">
+  <div id="photo-menu" class="hidden"><button id="paste-photo">paste</button><button id="library">library</button></div>
   <div class="bar">
     <button id="mic" class="input" aria-label="Mic"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg></button>
     <button id="attach" class="input" aria-label="Photo"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h4l2-3h6l2 3h4v11H3z"/><circle cx="12" cy="13" r="3.5"/></svg></button>
@@ -127,6 +134,7 @@
     <button data-key="shift+tab">shift-tab</button>
     <button data-key="ctrl+c" class="danger">ctrl-c</button>
     <button data-key="alt+p">model</button>
+  </div>
   </div>
 </section>
 
@@ -292,6 +300,7 @@ async function openPane(id) {
 async function showList() {
   stopRecording(true);
   disarm();
+  $("photo-menu").classList.add("hidden");
   unsent = null;
   setMic(MIC_ICON);
   if (current) await act(`/api/panes/${current}/back`);
@@ -318,7 +327,8 @@ document.addEventListener("touchstart", () => {}, { passive: true });
 
 // Keep the keyboard open: a tap on the key bar must not take focus away from the terminal.
 // iOS moves focus on the mousedown it fires after the touch. Blocking pointerdown instead would also block the click.
-document.querySelector(".bar").addEventListener("mousedown", (e) => e.preventDefault());
+// The photo menu above the bar is in the same box, so this covers it too.
+$("keys").addEventListener("mousedown", (e) => e.preventDefault());
 
 // Ctrl and Alt stay on until the next key typed into the terminal, so Ctrl then b is the tmux prefix.
 const mods = { ctrl: false, alt: false };
@@ -366,16 +376,45 @@ async function photoBase64(file) {
   });
 }
 
-$("attach").addEventListener("click", () => $("file").click());
-$("file").addEventListener("change", async () => {
+async function sendPhotos(blobs) {
   const pane = current, images = [];
   $("attach").disabled = true;
   $("attach").innerHTML = DOTS;
-  for (const f of $("file").files) await photoBase64(f).then((b) => images.push(b), (e) => toast(`Couldn't read ${f.name}: ${e.message}`));
-  $("file").value = "";
+  for (const f of blobs) await photoBase64(f).then((b) => images.push(b), (e) => toast(`Couldn't read ${f.name || "image"}: ${e.message}`));
   if (images.length && pane === current) await act(`/api/panes/${pane}/paste`, { images });
   $("attach").disabled = false;
   $("attach").innerHTML = PHOTO_ICON;
+}
+
+// Photo toggles a small menu: [paste] takes an image from the clipboard, [library] opens the photo picker.
+// A tap anywhere else closes it.
+$("attach").addEventListener("click", () => $("photo-menu").classList.toggle("hidden"));
+document.addEventListener("pointerdown", (e) => {
+  if (!e.target.closest("#photo-menu, #attach")) $("photo-menu").classList.add("hidden");
+});
+$("library").addEventListener("click", () => {
+  $("photo-menu").classList.add("hidden");
+  $("file").click();
+});
+$("file").addEventListener("change", () => {
+  const files = [...$("file").files];
+  $("file").value = "";
+  sendPhotos(files);
+});
+// iOS lets a page read the clipboard only inside the tap, so clipboard.read() runs before any await.
+// iOS then shows its own Paste button, which the user taps.
+$("paste-photo").addEventListener("click", async () => {
+  $("photo-menu").classList.add("hidden");
+  let blob;
+  try {
+    const items = await navigator.clipboard.read();
+    const item = items.find((i) => i.types.some((t) => t.startsWith("image/")));
+    if (!item) return toast("no image in clipboard");
+    blob = await item.getType(item.types.find((t) => t.startsWith("image/")));
+  } catch (e) {
+    return toast(e.message);
+  }
+  sendPhotos([blob]);
 });
 
 // Tap Mic to record, tap it again to end. The Mac transcribes it and pastes the text into the pane, without Enter.
