@@ -27,8 +27,8 @@
   /* Header buttons read as [Label]. Pressed or armed shows in reverse video. */
   button { font: inherit; color: var(--fg); background: none; border: 0; border-radius: 0; padding: 0 6px;
     min-height: 40px; cursor: pointer; }
-  header button::before, .br::before { content: "["; color: var(--dim); }
-  header button::after, .br::after { content: "]"; color: var(--dim); }
+  header button::before, .br::before, .bar button::before { content: "["; color: var(--dim); }
+  header button::after, .br::after, .bar button::after { content: "]"; color: var(--dim); }
   button:active, button.armed { background: var(--fg); color: var(--bg); }
   button:active::before, button:active::after, button.armed::before, button.armed::after { color: inherit; }
   button:disabled { color: var(--dim); }
@@ -71,12 +71,13 @@
   .bar::-webkit-scrollbar { display: none; }
   /* The key bar is one row of short glyphs in three groups, split by dim bars. */
   .bar { align-items: center; }
-  .bar button { flex-shrink: 0; min-width: 40px; min-height: 44px; padding: 0 6px; white-space: nowrap; }
+  .bar button { flex-shrink: 0; min-height: 44px; padding: 0 3px; white-space: nowrap; }
   .bar .input { color: var(--cyan); }
   .bar .mod { color: var(--yellow); }
   .bar button:active, .bar button.armed { background: var(--fg); color: var(--bg); }
   .bar .sep { flex-shrink: 0; color: var(--line); padding: 0 1px; user-select: none; -webkit-user-select: none; }
   #mic.recording { background: var(--red); color: var(--bg); }
+  #mic.recording::before, #mic.recording::after { color: inherit; }
   .icon { width: 20px; height: 20px; vertical-align: middle; fill: none; stroke: currentColor; stroke-width: 2; }
   /* Three dots bouncing in turn while a recording or photo is being sent. */
   .dots { color: var(--cyan); }

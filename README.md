@@ -13,7 +13,7 @@ It's for checking on and replying to Claude Code agents running in tmux panes. I
 - **Zoom:** pinch the terminal to change its font size (8 to 20). tmux re-fits to the new size. The size is kept for next time.
 - **Scroll:** swipe on the terminal. It works like the mouse wheel on the Mac: in Claude Code it scrolls the conversation, in a shell it scrolls the pane's history.
 - **Photo:** pick photos and they are pasted into the pane's input. Claude Code shows them as `[Image #N]`.
-- **Key bar:** one scrolling row in three groups: `mic photo enter │ ctrl alt │ esc ↑ ↓ ← → 1 2 3 tab shift-tab ctrl-c model`. Mic and photo are icons; the rest are words. model is alt+p. Bouncing dots mean a recording or photo is being sent. Tapping the bar keeps the keyboard open.
+- **Key bar:** one scrolling row in three groups: `[mic] [photo] [enter] │ [ctrl] [alt] │ [esc] [↑] [↓] [←] [→] [1] [2] [3] [tab] [shift-tab] [ctrl-c] [model]`. Mic and photo are icons; the rest are words. model is alt+p. Bouncing dots mean a recording or photo is being sent. Tapping the bar keeps the keyboard open.
 - **Ctrl and Alt:** tap one, then type a key on the phone's keyboard: Ctrl then b is tmux's prefix, so every tmux command works. It turns off after one key; tap it again to turn it off sooner.
 - **Look:** a terminal look throughout: black, monospace, square, `[bracketed]` header buttons.
 - **Dictation:** tap mic, talk, tap it again (it shows the time while recording). Whisper large-v3-turbo transcribes it on the Mac in about a second and pastes the text into the pane. Nothing is submitted until you press Enter. The audio never leaves the Mac.
