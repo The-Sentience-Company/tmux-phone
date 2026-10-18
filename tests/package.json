@@ -1,0 +1,11 @@
+{
+  "name": "tmux-phone-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node browser_test.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}

@@ -1,0 +1,1 @@
+Browser test: `cd tests && npm ci && npx playwright install webkit && node browser_test.mjs`. It runs the app as an iPhone in WebKit against a private tmux server and its own HOME, so your real tmux is never touched. Needs the whisper model from `./install.sh`.

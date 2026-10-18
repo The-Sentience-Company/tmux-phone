@@ -15,23 +15,27 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-HOST, PORT = "127.0.0.1", 8766
+HOST, PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_PORT", "8766"))
 # Set by install.sh in the launchd job: this Mac's tailnet URL, and the one Tailscale login allowed in.
 PUBLIC_ORIGIN = os.environ.get("TMUX_PHONE_ORIGIN", "")
 ALLOWED_LOGIN = os.environ.get("TMUX_PHONE_LOGIN", "")
 STATE = Path.home() / ".local/state/tmux-phone"
 TTYD_SOCKET = STATE / "ttyd.sock"
-INDEX = Path(__file__).resolve().parent / "static/index.html"
+STATIC = Path(__file__).resolve().parent / "static"
+INDEX = STATIC / "index.html"
+# The terminal library the page loads; only these paths are served.
+VENDOR = {"/vendor/xterm.js": "text/javascript; charset=utf-8", "/vendor/xterm.css": "text/css; charset=utf-8",
+          "/vendor/addon-fit.js": "text/javascript; charset=utf-8"}
 MAX_BODY = 64 * 1024
 MAX_AUDIO = 25 * 1024 * 1024
-MAX_IMAGES = 20 * 1024 * 1024  # all images in one message, before base64
+MAX_IMAGES = 20 * 1024 * 1024  # all images in one paste, before base64
 UPLOADS = STATE / "uploads"
 UPLOAD_DAYS = 7
 IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg", b"GIF87a": "gif", b"GIF89a": "gif"}
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
-WHISPER_HOST, WHISPER_PORT = "127.0.0.1", 8767
+WHISPER_HOST, WHISPER_PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_WHISPER_PORT", "8767"))
 
-PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|send|key|scroll|close)$")
+PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|paste|key|scroll|close)$")
 # Phone button name -> tmux send-keys name. Digits answer Claude's numbered menus.
 KEYS = {"enter": "Enter", "escape": "Escape", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
         "tab": "Tab", "shift+tab": "BTab", "ctrl+c": "C-c", "alt+p": "M-p", "1": "1", "2": "2", "3": "3"}
@@ -208,10 +212,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed(needs_origin=is_websocket):
             return self.reply(403, {"error": "forbidden"})
         try:
-            if self.path.startswith("/term/") or self.path == "/term":
-                return self.proxy_websocket() if is_websocket else self.proxy_http()
+            if self.path == "/term/ws" and is_websocket:
+                return self.proxy_websocket()
             if self.path == "/":
                 return self.reply(200, INDEX.read_bytes(), "text/html; charset=utf-8")
+            if self.path in VENDOR:
+                return self.reply(200, (STATIC / self.path.lstrip("/")).read_bytes(), VENDOR[self.path])
             if self.path == "/api/panes":
                 return self.reply(200, {"panes": list_panes()})
             self.reply(404, {"error": "not found"})
@@ -237,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(502, {"error": f"transcription failed: {e}"})
         if not self.allowed(needs_origin=True) or content_type != "application/json":
             return self.reply(403, {"error": "forbidden"})
-        if length > (MAX_IMAGES * 4 // 3 + MAX_BODY if self.path.endswith("/send") else MAX_BODY):
+        if length > (MAX_IMAGES * 4 // 3 + MAX_BODY if self.path.endswith("/paste") else MAX_BODY):
             return self.reply(413, {"error": "too large"})
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -251,10 +257,11 @@ class Handler(BaseHTTPRequestHandler):
                 open_pane(pane)
             elif action == "back":
                 unzoom(pane)
-            elif action == "send":
+            elif action == "paste":
+                # Dictated text or photos go into the pane's input; the phone's Enter key submits it.
                 text, images = body.get("text", ""), body.get("images") or []
                 if not isinstance(text, str) or not isinstance(images, list) or not all(isinstance(i, str) for i in images):
-                    return self.reply(400, {"error": "bad message"})
+                    return self.reply(400, {"error": "bad paste"})
                 if not text.strip() and not images:
                     return self.reply(400, {"error": "empty text"})
                 paths = []
@@ -269,11 +276,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Claude Code turns a pasted image path into an attachment, but only at the end of the text.
                 text = " ".join([text.strip(), *paths]).strip()
                 leave_scroll(pane)
-                # Bracketed paste, so a multi-line message arrives as one message, then Enter submits it.
+                # Bracketed paste, so multi-line text arrives as one paste and nothing is submitted.
                 tmux("load-buffer", "-b", "phone", "-", stdin=text)
                 tmux("paste-buffer", "-p", "-d", "-b", "phone", "-t", pane)
-                time.sleep(0.15)
-                tmux("send-keys", "-t", pane, "Enter")
             elif action == "key":
                 key = KEYS.get(body.get("key"))
                 if not key:
@@ -301,23 +306,6 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             traceback.print_exc()
             self.reply(500, {"error": "server error"})
-
-    def proxy_http(self):
-        """ttyd's own page and token, fetched over its socket one request at a time."""
-        conn = UnixHTTPConnection(str(TTYD_SOCKET))
-        try:
-            conn.request("GET", self.path, headers={"Host": self.headers.get("Host", ""), "Accept-Encoding": self.headers.get("Accept-Encoding", "")})
-            r = conn.getresponse()
-            data = r.read()
-        finally:
-            conn.close()
-        self.send_response(r.status)
-        for name, value in r.getheaders():
-            if name.lower() not in ("connection", "keep-alive", "transfer-encoding", "content-length"):
-                self.send_header(name, value)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
 
     def proxy_websocket(self):
         """Hand the checked connection to ttyd and copy bytes both ways until either side closes."""
@@ -348,16 +336,6 @@ class Handler(BaseHTTPRequestHandler):
         upstream.close()
 
 
-class UnixHTTPConnection(HTTPConnection):
-    def __init__(self, path):
-        super().__init__("localhost")
-        self.path = path
-
-    def connect(self):
-        self.sock = socket.socket(socket.AF_UNIX)
-        self.sock.connect(self.path)
-
-
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -367,7 +345,6 @@ def start_ttyd():
     TTYD_SOCKET.unlink(missing_ok=True)
     proc = subprocess.Popen([
         "ttyd", "--interface", str(TTYD_SOCKET), "--base-path", "/term", "--writable", "--check-origin",
-        "-t", "fontSize=13", "-t", "disableLeaveAlert=true", "-t", "disableResizeOverlay=true",
         "tmux", "attach",
     ])
     threading.Thread(target=lambda: (proc.wait(), os._exit(1)), daemon=True).start()

@@ -7,13 +7,12 @@ It's for checking on and replying to Claude Code agents running in tmux panes. I
 ## What it does
 
 - **Pane list:** every tmux pane, grouped by window. Each shows its title, its last line, and a status for Claude Code panes (Needs you / Working / Idle). Refreshes every 3 s.
-- **Open a pane:** tap it. The phone switches to it and zooms it if its window is split. The screen is the real terminal (ttyd running `tmux attach`).
+- **Open a pane:** tap it. The phone switches to it and zooms it if its window is split. The screen is the real terminal: a small xterm.js client on the page, talking to ttyd running `tmux attach`. Type straight into it. It reconnects by itself if the connection drops.
 - **Buttons:** Close pane, New window. Splitting is left to the Mac, since a phone shows one pane at a time.
 - **Scroll:** swipe on the terminal to scroll back through the pane.
-- **Photos:** attach photos to a message. Claude Code receives them as `[Image #N]`.
-- **Key bar:** Esc, Enter, arrows, 1/2/3, Tab, ⇧Tab, Model (alt+p), Ctrl-C.
-- **Message box:** pastes the text into the pane, then presses Enter.
-- **Dictation:** tap Mic, talk, tap Stop. Whisper large-v3-turbo transcribes it on the Mac in about a second. The audio never leaves the Mac.
+- **Photo:** pick photos and they are pasted into the pane's input. Claude Code shows them as `[Image #N]`.
+- **Key bar:** Mic, Photo, Esc, Enter, arrows, 1/2/3, Tab, ⇧Tab, Model (alt+p), Ctrl-C.
+- **Dictation:** tap Mic, talk, tap Stop. Whisper large-v3-turbo transcribes it on the Mac in about a second and pastes the text into the pane. Nothing is submitted until you press Enter. The audio never leaves the Mac.
 
 tmux resizes to fit the phone while it's attached. It resizes back when you use the Mac again.
 
@@ -51,7 +50,7 @@ Logs: `~/.local/state/tmux-phone/server.log`.
 - dictation returns the spoken words
 - other websites get 403
 
-It only reads. It never creates, switches, types into or resizes anything in your tmux, so it doesn't cover opening, sending, photos or scrolling.
+It only reads. It never creates, switches, types into or resizes anything in your tmux, so it doesn't cover opening, pasting, photos or scrolling.
 
 ## Security
 

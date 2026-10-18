@@ -7,6 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="tmux">
 <title>tmux</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
 <style>
   :root {
     --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --line: #e5e5ea; --card: #f5f5f7;
@@ -44,19 +45,13 @@
   .chip.needs_you { color: var(--needs); } .chip.working { color: var(--working); } .chip.idle { color: var(--idle); }
   #list-error { color: var(--danger); padding: 12px; }
 
-  #term-wrap { flex: 1; min-height: 0; background: #000; }
-  #term { width: 100%; height: 100%; border: 0; display: block; }
+  #term-wrap { flex: 1; min-height: 0; background: #000; position: relative; }
+  #term { width: 100%; height: 100%; }
+  #term-status { position: absolute; top: 6px; right: 8px; font-size: 12px; color: #98989d; background: rgba(0, 0, 0, .7);
+    padding: 2px 8px; border-radius: 99px; pointer-events: none; z-index: 5; }
   .bar { display: flex; gap: 6px; padding: 6px 8px; overflow-x: auto; border-top: 1px solid var(--line); flex-shrink: 0; }
   .bar button { flex-shrink: 0; min-width: 44px; padding: 8px 10px; }
-  #reply { display: flex; gap: 6px; padding: 6px 8px 8px; flex-shrink: 0; }
-  #thumbs { display: flex; gap: 8px; padding: 10px 8px 0; overflow-x: auto; flex-shrink: 0; }
-  .thumb { position: relative; flex-shrink: 0; }
-  .thumb img { height: 64px; border-radius: 8px; display: block; }
-  .thumb button { position: absolute; top: -6px; right: -6px; min-height: 0; min-width: 0; padding: 2px 7px;
-    border-radius: 99px; font-size: 13px; }
   #mic.recording { background: var(--danger); color: #fff; }
-  #reply textarea { flex: 1; resize: none; font: inherit; color: var(--fg); background: var(--card);
-    border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; height: 42px; max-height: 120px; }
   #toast { position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%); background: var(--fg); color: var(--bg);
     padding: 8px 14px; border-radius: 10px; font-size: 14px; max-width: 90vw; z-index: 10; }
 </style>
@@ -77,8 +72,11 @@
     <h1 id="pane-title"></h1>
     <button id="close-pane" class="danger">Close</button>
   </header>
-  <div id="term-wrap"><iframe id="term" title="Terminal"></iframe></div>
+  <div id="term-wrap"><div id="term"></div><div id="term-status" class="hidden">Reconnecting…</div></div>
   <div class="bar">
+    <button id="mic" aria-label="Dictate">Mic</button>
+    <button id="attach" aria-label="Add photo">Photo</button>
+    <input type="file" id="file" accept="image/*" multiple hidden>
     <button data-key="escape">Esc</button>
     <button data-key="enter">Enter</button>
     <button data-key="up">↑</button>
@@ -93,18 +91,12 @@
     <button data-key="alt+p">Model</button>
     <button data-key="ctrl+c">Ctrl-C</button>
   </div>
-  <div id="thumbs" class="hidden"></div>
-  <form id="reply">
-    <button id="attach" type="button" aria-label="Add photo">Photo</button>
-    <input type="file" id="file" accept="image/*" multiple hidden>
-    <textarea id="text" rows="1" placeholder="Message" autocomplete="off"></textarea>
-    <button id="mic" type="button" aria-label="Dictate">Mic</button>
-    <button id="send" class="primary" type="submit">Send</button>
-  </form>
 </section>
 
 <div id="toast" class="hidden"></div>
 
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const STATUS_LABEL = { needs_you: "Needs you", working: "Working", idle: "Idle" };
@@ -187,18 +179,16 @@ async function openPane(id) {
   if (!(await act(`/api/panes/${id}/open`))) return;
   current = id;
   $("pane-title").textContent = lastTitle[id] || "";
-  // One terminal connection for the whole visit; tmux switches what it shows.
-  if (!$("term").src) $("term").src = "/term/";
   $("list").classList.add("hidden");
   $("pane").classList.remove("hidden");
+  // One terminal connection for the whole visit; tmux switches what it shows.
+  if (!socket) startTerminal();
 }
 
 async function showList() {
   stopRecording(true);
   unsent = null;
   setMic("Mic");
-  $("text").value = "";
-  clearImages();
   if (current) await act(`/api/panes/${current}/back`);
   current = null;
   $("pane").classList.add("hidden");
@@ -221,11 +211,9 @@ document.querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click
   act(`/api/panes/${current}/key`, { key: b.dataset.key });
 }));
 
-// Photos wait as thumbnails until Send. The Mac saves them and pastes their paths after the text,
-// which Claude Code turns into image attachments.
-let images = [];  // [{url, b64}]
-
-async function addImage(file) {
+// A picked photo is pasted into the pane right away as a file path on the Mac, which Claude Code
+// turns into an image attachment. Enter submits it.
+async function photoBase64(file) {
   // Redrawing on a canvas turns HEIC into JPEG and keeps big photos small; Claude downsizes past ~1600px anyway.
   const bitmap = await createImageBitmap(file);
   const scale = Math.min(1, 2000 / Math.max(bitmap.width, bitmap.height));
@@ -234,55 +222,27 @@ async function addImage(file) {
   canvas.height = Math.round(bitmap.height * scale);
   canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
-  const b64 = await new Promise((r) => {
+  return new Promise((r) => {
     const reader = new FileReader();
     reader.onload = () => r(reader.result.split(",")[1]);
     reader.readAsDataURL(blob);
   });
-  images.push({ url: URL.createObjectURL(blob), b64 });
-}
-
-function renderThumbs() {
-  $("thumbs").innerHTML = "";
-  images.forEach((img, i) => {
-    const d = document.createElement("div");
-    d.className = "thumb";
-    d.innerHTML = `<img src="${img.url}" alt=""><button type="button" aria-label="Remove photo">×</button>`;
-    d.querySelector("button").onclick = () => { URL.revokeObjectURL(img.url); images.splice(i, 1); renderThumbs(); };
-    $("thumbs").appendChild(d);
-  });
-  $("thumbs").classList.toggle("hidden", !images.length);
-}
-
-function clearImages() {
-  images.forEach((img) => URL.revokeObjectURL(img.url));
-  images = [];
-  renderThumbs();
 }
 
 $("attach").addEventListener("click", () => $("file").click());
 $("file").addEventListener("change", async () => {
-  for (const f of $("file").files) await addImage(f).catch((e) => toast(`Couldn't read ${f.name}: ${e.message}`));
+  const pane = current, images = [];
+  $("attach").disabled = true;
+  $("attach").textContent = "Sending…";
+  for (const f of $("file").files) await photoBase64(f).then((b) => images.push(b), (e) => toast(`Couldn't read ${f.name}: ${e.message}`));
   $("file").value = "";
-  renderThumbs();
+  if (images.length && pane === current) await act(`/api/panes/${pane}/paste`, { images });
+  $("attach").disabled = false;
+  $("attach").textContent = "Photo";
 });
 
-$("reply").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const text = $("text").value;
-  if (!text.trim() && !images.length) return;
-  $("send").disabled = true;
-  $("send").textContent = images.length ? "Sending…" : "Send";
-  if (await act(`/api/panes/${current}/send`, { text, images: images.map((i) => i.b64) })) {
-    $("text").value = "";
-    clearImages();
-  }
-  $("send").disabled = false;
-  $("send").textContent = "Send";
-});
-
-// Tap Mic to record, tap Stop to end. The Mac transcribes it and the text lands in the box to check before Send.
-// A recording that fails to transcribe is kept, and Mic becomes Retry, so nothing said is lost.
+// Tap Mic to record, tap Stop to end. The Mac transcribes it and pastes the text into the pane, without Enter.
+// A recording that fails to transcribe or paste is kept, and Mic becomes Retry, so nothing said is lost.
 let recorder = null, unsent = null, timer = null;
 
 function setMic(label, { recording = false, busy = false } = {}) {
@@ -306,12 +266,10 @@ async function sendAudio(audio) {
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
     if (pane !== current) return;  // left that pane while it was transcribing
+    if (data.text) await post(`/api/panes/${pane}/paste`, { text: data.text });
     unsent = null;
     setMic("Mic");
-    if (!data.text) return toast("Didn't catch anything.");
-    const box = $("text");
-    box.value = box.value.trim() ? `${box.value.trimEnd()} ${data.text}` : data.text;
-    box.focus();
+    if (!data.text) toast("Didn't catch anything.");
   } catch (e) {
     if (pane !== current) return;
     unsent = audio;
@@ -350,10 +308,53 @@ $("mic").addEventListener("click", async () => {
   timer = setInterval(tick, 1000);
 });
 
+// Our own client for ttyd's websocket (ttyd 1.7.7). The page sends its size as JSON first, then
+// "0" + typed bytes and "1" + new size. ttyd sends "0" + output, "1" + title, "2" + its settings.
+const term = new Terminal({ fontSize: 13, fontFamily: "Menlo, monospace", theme: { background: "#000000" } });
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+const encoder = new TextEncoder();
+let socket = null, retryMs = 1000, retryTimer = null;
+
+function startTerminal() {
+  term.open($("term"));
+  fit.fit();
+  term.onData((data) => { if (socket.readyState === WebSocket.OPEN) socket.send(encoder.encode("0" + data)); });
+  term.onResize(({ cols, rows }) => {
+    if (socket.readyState === WebSocket.OPEN) socket.send(encoder.encode("1" + JSON.stringify({ columns: cols, rows })));
+  });
+  // Fit to the box whenever it changes size, e.g. when the keyboard opens. Skipped while hidden, which reads as 0 wide.
+  new ResizeObserver(() => { if ($("term-wrap").clientWidth) fit.fit(); }).observe($("term-wrap"));
+  connect();
+}
+
+// Any close reconnects by itself, waiting 1 s, then 2 s, up to 5 s; nothing needs a key press.
+function connect() {
+  clearTimeout(retryTimer);
+  if (socket) { socket.onclose = socket.onmessage = null; socket.close(); }
+  const ws = socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/term/ws`, ["tty"]);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {
+    retryMs = 1000;
+    $("term-status").classList.add("hidden");
+    term.reset();  // tmux redraws the whole screen on attach
+    ws.send(encoder.encode(JSON.stringify({ AuthToken: "", columns: term.cols, rows: term.rows })));
+  };
+  ws.onmessage = (e) => {
+    const data = new Uint8Array(e.data);
+    if (data[0] === 48) term.write(data.subarray(1));  // "0" is output; title and settings are not used
+  };
+  ws.onclose = () => {
+    $("term-status").classList.remove("hidden");
+    retryTimer = setTimeout(connect, retryMs);
+    retryMs = Math.min(retryMs * 2, 5000);
+  };
+}
+
 // tmux draws on the terminal's alternate screen, so the browser terminal has nothing of its own to scroll.
-// A vertical swipe on it scrolls the tmux pane instead, like a mouse wheel on the Mac. Taps still reach the terminal.
+// A vertical swipe on it scrolls the tmux pane instead, like a mouse wheel on the Mac. A tap opens the keyboard.
 const LINE_PX = 16;
-let scrollY = null, scrollPx = 0, scrollQueued = 0, scrolling = false, reconnectTimer = null;
+let scrollY = null, scrollPx = 0, scrollQueued = 0, scrolling = false, swiped = false;
 
 async function flushScroll() {
   if (scrolling || !scrollQueued || !current) return;
@@ -365,29 +366,29 @@ async function flushScroll() {
   flushScroll();
 }
 
-$("term").addEventListener("load", () => {
-  const doc = $("term").contentDocument;
-  // When the terminal's connection ends cleanly (a restart on the Mac), ttyd waits for Enter on a keyboard
-  // the phone doesn't have. Reconnect instead, at most every 2 s so a stopped Mac doesn't loop hot.
-  new MutationObserver(() => {
-    if (!doc.body.textContent.includes("Press ⏎ to Reconnect") || reconnectTimer) return;
-    reconnectTimer = setTimeout(() => { reconnectTimer = null; $("term").src = "/term/"; }, 2000);
-  }).observe(doc.body, { childList: true, subtree: true, characterData: true });
-  doc.addEventListener("touchstart", (e) => { scrollY = e.touches[0].clientY; scrollPx = 0; }, { passive: true });
-  doc.addEventListener("touchmove", (e) => {
-    if (scrollY === null) return;
-    e.preventDefault();
-    const y = e.touches[0].clientY;
-    scrollPx += y - scrollY;  // finger moving down shows older lines
-    scrollY = y;
-    const lines = Math.trunc(scrollPx / LINE_PX);
-    if (!lines) return;
-    scrollPx -= lines * LINE_PX;
-    scrollQueued += lines;
-    flushScroll();
-  }, { passive: false, capture: true });
-  doc.addEventListener("touchend", () => { scrollY = null; }, { passive: true });
-});
+$("term-wrap").addEventListener("touchstart", (e) => {
+  scrollY = e.touches[0].clientY;
+  scrollPx = 0;
+  swiped = false;
+}, { passive: true, capture: true });
+$("term-wrap").addEventListener("touchmove", (e) => {
+  if (scrollY === null) return;
+  e.preventDefault();
+  e.stopPropagation();  // the terminal's own touch scrolling has nothing to scroll
+  const y = e.touches[0].clientY;
+  scrollPx += y - scrollY;  // finger moving down shows older lines
+  scrollY = y;
+  const lines = Math.trunc(scrollPx / LINE_PX);
+  if (!lines) return;
+  swiped = true;
+  scrollPx -= lines * LINE_PX;
+  scrollQueued += lines;
+  flushScroll();
+}, { passive: false, capture: true });
+$("term-wrap").addEventListener("touchend", () => {
+  scrollY = null;
+  if (!swiped) term.focus();  // inside the touch, so iOS opens the keyboard
+}, { passive: true, capture: true });
 
 // Swipe right on the header goes back to the list; the terminal itself keeps its own touches.
 let touchX = null;
@@ -397,8 +398,9 @@ $("pane-header").addEventListener("touchend", (e) => {
   touchX = null;
 });
 
+// iOS drops the connection while the app is in the background; reconnect at once on return.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && $("term").src) $("term").src = "/term/";
+  if (!document.hidden && socket && socket.readyState !== WebSocket.OPEN) connect();
 });
 
 setInterval(() => { if (!current && !document.hidden) loadPanes(); }, 3000);
