@@ -461,11 +461,40 @@ async function main() {
     });
 
     const windowId = paneInfo(pane, "window_id").slice(1);
-    await check("[edit] then [rename] on a window renames it in tmux and in the list, through a list refresh", async () => {
+    // Edit mode: tap a row to select it, then act from the bar at the bottom.
+    const barLabels = () => page.$$eval("#edit-bar button", (bs) => bs.map((b) => b.textContent));
+    const select = (key) => page.tap(`#list-body [data-sel="${key}"]`);
+    const bar = (act) => page.tap(`#edit-bar [data-act="${act}"]`);
+    const renames = [];
+    page.on("request", (r) => { if (r.method() === "POST" && r.url().endsWith("/rename")) renames.push(r.url()); });
+
+    await check("[edit] keeps the plain tree with no buttons in it; the bar's actions follow the selection", async () => {
       await page.tap("#back");
       await page.tap("#edit");
       assert((await page.textContent("#edit")) === "done", "the toggle does not say done");
-      await page.tap(`[data-act="rename-window"][data-id="${windowId}"]`);
+      assert(!(await page.locator("#list-body .pane button, #list-body .window-name button").count()), "a row in the list has buttons");
+      assert(await page.locator("#sessions").isVisible(), "the session row is hidden in edit mode");
+      const near = (want) => async () => JSON.stringify(await barLabels()) === JSON.stringify(want);
+      assert(await near(["new window", "new session"])(), `bar with nothing selected: ${await barLabels()}`);
+      const bar0 = await page.locator("#edit-bar").boundingBox(), strip = await page.locator("#statusline").boundingBox();
+      assert(Math.abs(bar0.y + bar0.height - strip.y) <= 1, `bar ${JSON.stringify(bar0)} is not right above the strip ${JSON.stringify(strip)}`);
+      await select(`window:${windowId}`);
+      assert(await near(["rename", "new pane", "close window"])(), `bar with a window: ${await barLabels()}`);
+      assert(await page.locator(`#list-body .sel[data-sel="window:${windowId}"]`).count(), "the window is not highlighted");
+      await select(`pane:${paneId}`);
+      assert(await near(["rename", "close pane"])(), `bar with a pane: ${await barLabels()}`);
+      assert((await page.locator("#list-body .sel").count()) === 1, "more than one row is selected");
+      const sid = (await pageSessions(page))[0].id;
+      await select(`session:${sid}`);
+      assert(await near(["rename", "close session"])(), `bar with the phone's session: ${await barLabels()}`);
+      await select(`session:${sid}`);
+      assert(await near(["new window", "new session"])(), `bar after tapping the session again: ${await barLabels()}`);
+      assert(!(await page.locator("#list-body .sel").count()), "a row is still selected");
+    });
+
+    await check("[rename] on a window renames it in tmux and in the list, through a list refresh; Enter sends one request", async () => {
+      await select(`window:${windowId}`);
+      await bar("rename");
       const input = page.locator("input.rename");
       assert((await input.inputValue()) === paneInfo(pane, "window_name"), `prefilled with ${await input.inputValue()}`);
       assert(await input.evaluate((el) => el === document.activeElement), "the input is not focused");
@@ -473,19 +502,33 @@ async function main() {
       await sleep(3500);  // one list refresh
       assert((await page.locator("input.rename").count()) === 1 && (await input.inputValue()) === "renamed #win",
              "the list refresh threw away the typing");
+      renames.length = 0;
       await page.keyboard.press("Enter");
       await waitFor(() => paneInfo(pane, "window_name") === "renamed #win", 5000, `window_name (now ${paneInfo(pane, "window_name")})`);
       await waitFor(async () => (await page.textContent("#list-body")).includes("renamed #win"), 5000, "the new name in the list");
+      await sleep(500);
+      assert(renames.length === 1, `${renames.length} rename requests`);
     });
 
-    await check("[rename] on a pane renames its title; tapping the row in edit mode opens nothing", async () => {
-      await page.tap(`[data-act="rename-pane"][data-id="${paneId}"]`);
+    await check("[rename] on a pane saves when the box loses focus; tapping the row in edit mode opens nothing", async () => {
+      await select(`pane:${paneId}`);
+      await bar("rename");
       await page.locator("input.rename").fill("my pane");
-      await page.keyboard.press("Enter");
+      await page.tap("#list h1");  // tapping away, as iOS's Done does
       await waitFor(() => paneInfo(pane, "pane_title") === "my pane", 5000, `pane_title (now ${paneInfo(pane, "pane_title")})`);
-      await page.tap("#list-body .pane .line");
+      await page.tap(`#list-body [data-sel="pane:${paneId}"] .line`);
       await sleep(500);
       assert(await page.locator("#list").isVisible(), "the tap opened the pane");
+    });
+
+    await check("Escape cancels a rename", async () => {
+      await page.tap(`#list-body [data-sel="pane:${paneId}"] .line`);  // selects it again
+      await bar("rename");
+      await page.locator("input.rename").fill("not saved");
+      renames.length = 0;
+      await page.keyboard.press("Escape");
+      await sleep(1000);
+      assert(paneInfo(pane, "pane_title") === "my pane" && !renames.length, `pane_title is ${paneInfo(pane, "pane_title")}, ${renames.length} requests`);
     });
 
     await check("a bad name is refused", async () => {
@@ -498,7 +541,8 @@ async function main() {
     let added = null;
     await check("[new pane] adds a pane to the window and opens it on the phone", async () => {
       const before = Number(paneInfo(pane, "window_panes"));
-      await page.tap(`[data-act="add-pane"][data-id="${windowId}"]`);
+      if (!(await page.locator(`#list-body .sel[data-sel="window:${windowId}"]`).count())) await select(`window:${windowId}`);
+      await bar("add-pane");
       await page.waitForSelector("#pane:not(.hidden)");
       assert(Number(paneInfo(pane, "window_panes")) === before + 1, `window_panes is ${paneInfo(pane, "window_panes")}, was ${before}`);
       added = await page.evaluate(() => current);
@@ -506,15 +550,37 @@ async function main() {
       assert(tmux("display-message", "-p", "-t", "test", "#{pane_id}").trim() === `%${added}`, "tmux's active pane is not the new one");
     });
 
-    await check("[close] on a pane closes it after a confirm; [done] leaves edit mode", async () => {
+    await check("[close pane] closes it after a confirm and clears the selection", async () => {
       assert(added, "no pane was added");
       await page.tap("#back");
+      await select(`pane:${added}`);
       page.once("dialog", (d) => d.accept());
-      await page.tap(`[data-act="close-pane"][data-id="${added}"]`);
+      await bar("close-pane");
       await waitFor(() => !tmux("list-panes", "-a", "-F", "#{pane_id}").includes(`%${added}`), 5000, "the pane to close");
-      await page.waitForSelector(`[data-act="close-pane"][data-id="${added}"]`, { state: "detached" });
+      await page.waitForSelector(`[data-sel="pane:${added}"]`, { state: "detached" });
+      assert(JSON.stringify(await barLabels()) === '["new window","new session"]', `bar: ${await barLabels()}`);
+    });
+
+    await check("[close window] kills the window after a confirm naming its panes", async () => {
+      const w = tmux("new-window", "-d", "-P", "-F", "#{window_id}", "-t", "test:", "-n", "doomed", "sh").trim();
+      await page.waitForSelector(`[data-sel="window:${w.slice(1)}"]`, { timeout: 5000 });
+      await select(`window:${w.slice(1)}`);
+      let message = "";
+      page.once("dialog", (d) => { message = d.message(); d.accept(); });
+      await bar("close-window");
+      await waitFor(() => !tmux("list-windows", "-a", "-F", "#{window_id}").split("\n").includes(w), 5000, "the window to close");
+      assert(/"doomed"/.test(message) && /1 pane\b/.test(message), `the confirm said: ${message}`);
+      await page.waitForSelector(`[data-sel="window:${w.slice(1)}"]`, { state: "detached" });
+    });
+
+    await check("[done] while renaming saves the name, then leaves edit mode", async () => {
+      await select(`pane:${paneId}`);
+      await bar("rename");
+      await page.locator("input.rename").fill("done-saved");
       await page.tap("#edit");
+      await waitFor(() => paneInfo(pane, "pane_title") === "done-saved", 5000, `pane_title (now ${paneInfo(pane, "pane_title")})`);
       assert((await page.textContent("#edit")) === "edit", "the toggle does not say edit");
+      assert(!(await page.locator("#edit-bar").isVisible()), "the bar still shows");
       await page.waitForSelector(`button[data-pane="${paneId}"]`);
     });
 
@@ -564,13 +630,15 @@ async function main() {
     await check("a new version does not reload while a name is being typed", async () => {
       await page.tap("#back");
       await page.tap("#edit");
-      await page.tap(`[data-act="rename-pane"][data-id="${paneId}"]`);
+      await select(`pane:${paneId}`);
+      await bar("rename");
       await mark();
       deploy();
       await sleep(4000);
       assert(!(await reloaded()), "the page reloaded during the rename");
       await page.keyboard.press("Escape");
       await waitFor(reloaded, 10000, "the page to reload after the rename");
+      await page.waitForSelector("#edit:text-is(\"edit\")");
       await page.waitForSelector(`button[data-pane="${paneId}"]`);
     });
 
@@ -583,7 +651,7 @@ async function main() {
     await check("a session made on the Mac shows in the row; the phone stays on its session", async () => {
       tmux("new-session", "-d", "-s", "work", "-x", "80", "-y", "24", "sh");
       tmux("send-keys", "-t", "=work:", "clear; echo work-marker", "Enter");
-      await page.waitForSelector('#sessions button[data-act="switch-session"]:text-is("work")', { timeout: 5000 });
+      await page.waitForSelector('#sessions button:text-is("work")', { timeout: 5000 });
       assert(await page.locator('#sessions button.current:text-is("test")').count(), "test is not the highlighted session");
       assert(viewerGroupMate() === "test", `_phone is grouped with ${viewerGroupMate()}`);
     });
@@ -611,7 +679,7 @@ async function main() {
     await check("[new session] makes a real session in tmux ls and switches to it", async () => {
       const before = realSessions();
       await page.tap("#edit");
-      await page.tap('[data-act="new-session"]');
+      await bar("new-session");
       made = await waitFor(() => realSessions().find((n) => !before.includes(n)), 5000, "a new session in tmux ls");
       assert(/^\d+$/.test(made), `the new session is named ${made}, not tmux's number`);
       await waitFor(async () => (await currentName(page)) === made, 5000, `the phone on ${made} (is ${await currentName(page)})`);
@@ -620,7 +688,9 @@ async function main() {
 
     await check("[rename] on a session renames it; a name with . is refused", async () => {
       const id = (await pageSessions(page)).find((s) => s.name === "work").id;
-      await page.tap(`[data-act="rename-session"][data-id="${id}"]`);
+      await select(`session:${id}`);
+      assert(JSON.stringify(await barLabels()) === '["rename","switch to","close session"]', `bar: ${await barLabels()}`);
+      await bar("rename");
       await page.locator("input.rename").fill("my work");
       await page.keyboard.press("Enter");
       await waitFor(() => realSessions().includes("my work"), 5000, `the name in tmux (${realSessions()})`);
@@ -629,12 +699,13 @@ async function main() {
       assert(status === 400, `got ${status}`);
     });
 
-    await check("[close] on the phone's session closes it after a confirm naming its windows; the phone moves on", async () => {
+    await check("[close session] on the phone's session closes it after a confirm naming its windows; the phone moves on", async () => {
       assert(made, "no session was made");
       const id = (await pageSessions(page)).find((s) => s.name === made).id;
       let message = "";
       page.once("dialog", (d) => { message = d.message(); d.accept(); });
-      await page.tap(`[data-act="close-session"][data-id="${id}"]`);
+      await select(`session:${id}`);
+      await bar("close-session");
       await waitFor(() => !realSessions().includes(made), 5000, `${made} to close`);
       assert(/1 window\b/.test(message), `the confirm said: ${message}`);
       await waitFor(async () => ["test", "my work"].includes(await currentName(page)), 5000, `the phone on another session (${await currentName(page)})`);
