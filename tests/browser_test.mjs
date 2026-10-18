@@ -130,6 +130,33 @@ async function swipeDown(page, px) {
   }, px);
 }
 
+// Two fingers spreading apart vertically from the middle of the terminal. The first finger moves down,
+// so a page that took it for a one-finger swipe would send wheel-up and scroll the pane back.
+async function pinchOut(page, px) {
+  await page.evaluate(async (px) => {
+    const box = document.querySelector(".xterm").getBoundingClientRect();
+    const x = box.left + box.width / 2, yc = box.top + box.height / 2;
+    const target = document.elementFromPoint(x, yc);
+    const touch = (id, y) => document.createTouch(window, target, id, x, y, x, y);
+    const fire = (type, touches, changed) => {
+      const list = document.createTouchList(...touches);
+      target.dispatchEvent(new TouchEvent(type, { touches: list, targetTouches: list, changedTouches: document.createTouchList(...changed),
+                                                  bubbles: true, cancelable: true, composed: true }));
+    };
+    let a = touch(1, yc + 20), b = touch(2, yc - 20);
+    fire("touchstart", [a], [a]);
+    fire("touchstart", [a, b], [b]);
+    for (let i = 1; i <= 15; i++) {
+      a = touch(1, yc + 20 + (px * i) / 15);
+      b = touch(2, yc - 20 - (px * i) / 15);
+      fire("touchmove", [a, b], [a, b]);
+      await new Promise((r) => setTimeout(r, 16));
+    }
+    fire("touchend", [a], [b]);
+    fire("touchend", [], [a]);
+  }, px);
+}
+
 async function main() {
   assert(fs.existsSync(MODEL), `whisper model missing at ${MODEL}; run ./install.sh once`);
   fs.symlinkSync(MODEL, path.join(state, "models/ggml-large-v3-turbo-q5_0.bin"));
@@ -259,6 +286,86 @@ async function main() {
       const boxes = await page.locator("#pane textarea:not(.xterm-helper-textarea)").count();
       const sends = await page.locator("#pane").getByRole("button", { name: /^send$/i }).count() + await page.locator("#send").count();
       assert(!boxes && !sends, `found ${boxes} textarea(s) and ${sends} Send button(s)`);
+    });
+
+    await check("pinching out grows the font, tmux gets fewer columns, and no wheel input is sent", async () => {
+      // Note every wheel code the page sends from here on.
+      await page.evaluate(() => {
+        window.__wheels = 0;
+        const send = WebSocket.prototype.send;
+        WebSocket.prototype.send = function (data) {
+          if (new TextDecoder().decode(data).includes("\x1b[<6")) window.__wheels++;
+          return send.call(this, data);
+        };
+      });
+      const clientWidth = () => Number(tmux("list-clients", "-F", "#{client_width}").trim().split("\n")[0]);
+      const size0 = await page.evaluate(() => term.options.fontSize), cols0 = clientWidth();
+      await pinchOut(page, 40);
+      const size1 = await page.evaluate(() => term.options.fontSize);
+      assert(size1 > size0, `font size went from ${size0} to ${size1}`);
+      await waitFor(() => clientWidth() < cols0, 5000, `the tmux client to get narrower than ${cols0} columns (now ${clientWidth()})`);
+      assert(await page.evaluate(() => localStorage.getItem("tmux-phone.fontSize")) === String(size1), "the size was not saved");
+      await sleep(500);
+      assert(!(await page.evaluate(() => window.__wheels)), "the pinch sent wheel input");
+      assert(paneInfo(pane, "pane_in_mode") === "0", "the pane went into tmux scroll mode");
+    });
+
+    const windowId = paneInfo(pane, "window_id").slice(1);
+    await check("[edit] then [rn] on a window renames it in tmux and in the list, through a list refresh", async () => {
+      await page.tap("#back");
+      await page.tap("#edit");
+      assert((await page.textContent("#edit")) === "done", "the toggle does not say done");
+      await page.tap(`[data-act="rename-window"][data-id="${windowId}"]`);
+      const input = page.locator("input.rename");
+      assert((await input.inputValue()) === paneInfo(pane, "window_name"), `prefilled with ${await input.inputValue()}`);
+      assert(await input.evaluate((el) => el === document.activeElement), "the input is not focused");
+      await input.fill("renamed #win");
+      await sleep(3500);  // one list refresh
+      assert((await page.locator("input.rename").count()) === 1 && (await input.inputValue()) === "renamed #win",
+             "the list refresh threw away the typing");
+      await page.keyboard.press("Enter");
+      await waitFor(() => paneInfo(pane, "window_name") === "renamed #win", 5000, `window_name (now ${paneInfo(pane, "window_name")})`);
+      await waitFor(async () => (await page.textContent("#list-body")).includes("renamed #win"), 5000, "the new name in the list");
+    });
+
+    await check("[rn] on a pane renames its title; tapping the row in edit mode opens nothing", async () => {
+      await page.tap(`[data-act="rename-pane"][data-id="${paneId}"]`);
+      await page.locator("input.rename").fill("my pane");
+      await page.keyboard.press("Enter");
+      await waitFor(() => paneInfo(pane, "pane_title") === "my pane", 5000, `pane_title (now ${paneInfo(pane, "pane_title")})`);
+      await page.tap("#list-body .pane .line");
+      await sleep(500);
+      assert(await page.locator("#list").isVisible(), "the tap opened the pane");
+    });
+
+    await check("a bad name is refused", async () => {
+      const status = await page.evaluate((id) => fetch(`/api/panes/${id}/rename`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "a\u001bb" }) }).then((r) => r.status), paneId);
+      assert(status === 400, `got ${status}`);
+      assert(paneInfo(pane, "pane_title") === "my pane", "the title changed");
+    });
+
+    let added = null;
+    await check("[+pane] adds a pane to the window and opens it on the phone", async () => {
+      const before = Number(paneInfo(pane, "window_panes"));
+      await page.tap(`[data-act="add-pane"][data-id="${windowId}"]`);
+      await page.waitForSelector("#pane:not(.hidden)");
+      assert(Number(paneInfo(pane, "window_panes")) === before + 1, `window_panes is ${paneInfo(pane, "window_panes")}, was ${before}`);
+      added = await page.evaluate(() => current);
+      assert(added && added !== paneId, `the phone shows pane ${added}`);
+      assert(tmux("display-message", "-p", "-t", "test", "#{pane_id}").trim() === `%${added}`, "tmux's active pane is not the new one");
+    });
+
+    await check("[x] on a pane closes it after a confirm; [done] leaves edit mode", async () => {
+      assert(added, "no pane was added");
+      await page.tap("#back");
+      page.once("dialog", (d) => d.accept());
+      await page.tap(`[data-act="close-pane"][data-id="${added}"]`);
+      await waitFor(() => !tmux("list-panes", "-a", "-F", "#{pane_id}").includes(`%${added}`), 5000, "the pane to close");
+      await page.waitForSelector(`[data-act="close-pane"][data-id="${added}"]`, { state: "detached" });
+      await page.tap("#edit");
+      assert((await page.textContent("#edit")) === "edit", "the toggle does not say edit");
+      await page.waitForSelector(`button[data-pane="${paneId}"]`);
     });
 
     await context.close();
