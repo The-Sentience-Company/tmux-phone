@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Phone UI for the tmux session on this Mac, served on the tailnet via `tailscale serve`."""
 import base64
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,7 @@ STATE = Path.home() / ".local/state/tmux-phone"
 TTYD_SOCKET = STATE / "ttyd.sock"
 STATIC = Path(__file__).resolve().parent / "static"
 INDEX = STATIC / "index.html"
+SERVER_SOURCE = Path(__file__).read_bytes()  # a change to this file needs a restart, so reading it once is enough
 # The terminal library, web app manifest and icons the page loads; only these paths are served.
 STATIC_FILES = {"/vendor/xterm.js": "text/javascript; charset=utf-8", "/vendor/xterm.css": "text/css; charset=utf-8",
                 "/vendor/addon-fit.js": "text/javascript; charset=utf-8",
@@ -202,6 +204,11 @@ def add_pane(window):
     return tmux("split-window", side, "-t", window, "-P", "-F", "#{pane_id}").strip().lstrip("%")
 
 
+def version(page):
+    """Changes when this server or the page changes. The phone reloads itself when it sees a new one."""
+    return hashlib.sha1(SERVER_SOURCE + page).hexdigest()[:12]
+
+
 def unzoom(pane):
     if pane_info(pane, "window_zoomed_flag") == ["1"]:
         tmux("resize-pane", "-Z", "-t", pane)
@@ -237,11 +244,12 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/term/ws" and is_websocket:
                 return self.proxy_websocket()
             if self.path == "/":
-                return self.reply(200, INDEX.read_bytes(), "text/html; charset=utf-8")
+                page = INDEX.read_bytes()
+                return self.reply(200, page.replace(b"{{VERSION}}", version(page).encode()), "text/html; charset=utf-8")
             if self.path in STATIC_FILES:
                 return self.reply(200, (STATIC / self.path.lstrip("/")).read_bytes(), STATIC_FILES[self.path])
             if self.path == "/api/panes":
-                return self.reply(200, {"panes": list_panes()})
+                return self.reply(200, {"panes": list_panes(), "version": version(INDEX.read_bytes())})
             self.reply(404, {"error": "not found"})
         except TmuxError as e:
             self.reply(502, {"error": str(e)})

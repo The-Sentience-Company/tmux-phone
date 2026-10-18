@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-title" content="tmux">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#000000">
+<meta name="version" content="{{VERSION}}">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon-180.png">
 <title>tmux</title>
@@ -20,7 +21,8 @@
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 var(--font); }
-  body { height: var(--vh, 100dvh); overflow: hidden; }
+  /* The views fill the body, which is sized to what is visible, so the key bar sits right on the keyboard. */
+  body { position: relative; height: var(--vh, 100dvh); overflow: hidden; }
   /* The status bar text is white; keep the strip behind it black. */
   body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; height: env(safe-area-inset-top);
     background: #000; pointer-events: none; }
@@ -35,7 +37,9 @@
   button.primary { color: var(--green); }
   button.danger { color: var(--red); }
   .view { position: absolute; inset: 0; display: flex; flex-direction: column;
-    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) max(env(safe-area-inset-bottom) - 20px, 4px) env(safe-area-inset-left); }
+  /* The home indicator is under the keyboard then, so no room is kept for it. */
+  .keyboard .view { padding-bottom: 0; }
   .hidden { display: none !important; }
   header { display: flex; align-items: center; padding: 0 2px; border-bottom: 1px solid var(--line); }
   header h1 { font-size: inherit; color: var(--green); margin: 0 6px; flex: 1; min-width: 0;
@@ -151,7 +155,9 @@ let panes = [], editMode = false, renaming = false;  // the list skips its refre
 
 function setViewportHeight() {
   // iOS keeps the layout height when the keyboard opens; size the page to what is actually visible.
-  document.body.style.setProperty("--vh", `${(window.visualViewport || window).height}px`);
+  const height = (window.visualViewport || window).height;
+  document.body.style.setProperty("--vh", `${height}px`);
+  document.body.classList.toggle("keyboard", height < document.documentElement.clientHeight - 100);
   window.scrollTo(0, 0);
 }
 (window.visualViewport || window).addEventListener("resize", setViewportHeight);
@@ -190,12 +196,13 @@ async function loadPanes() {
   try {
     const r = await fetch("/api/panes");
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `Request failed (${r.status})`);
-    fresh = (await r.json()).panes;
+    fresh = await r.json();
   } catch (e) {
     if (!renaming) $("list-body").innerHTML = `<div id="list-error">Couldn't load panes: ${esc(e.message)}</div>`;
     return;
   }
-  panes = fresh;
+  panes = fresh.panes;
+  if (fresh.version !== VERSION) reloadWhenSafe();
   for (const p of panes) lastTitle[p.id] = p.title || p.command;
   if (!renaming) renderPanes();
 }
@@ -286,6 +293,16 @@ $("edit").addEventListener("click", () => {
   $("edit").textContent = editMode ? "done" : "edit";
   renderPanes();
 });
+
+// A new version on the Mac reloads the page, as the Home Screen app has no reload button.
+// Never in the middle of something: a recording, a send, a name being typed, the photo menu.
+// Until then each list poll tries again. The open pane is opened again after the reload.
+const VERSION = document.querySelector('meta[name="version"]').content, PANE_KEY = "tmux-phone.pane";
+function reloadWhenSafe() {
+  if (recorder || unsent || $("mic").disabled || $("attach").disabled || renaming || !$("photo-menu").classList.contains("hidden")) return;
+  try { if (current) sessionStorage.setItem(PANE_KEY, current); } catch {}
+  location.reload();
+}
 
 async function openPane(id) {
   if (!(await act(`/api/panes/${id}/open`))) return;
@@ -618,8 +635,12 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && socket && socket.readyState !== WebSocket.OPEN) connect();
 });
 
-setInterval(() => { if (!current && !document.hidden) loadPanes(); }, 3000);
+// The poll also runs in the pane view, to see a new version.
+setInterval(() => { if (!document.hidden) loadPanes(); }, 3000);
 loadPanes();
+let reopen = null;
+try { reopen = sessionStorage.getItem(PANE_KEY); sessionStorage.removeItem(PANE_KEY); } catch {}
+if (reopen) openPane(reopen);
 </script>
 </body>
 </html>
