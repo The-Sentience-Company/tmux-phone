@@ -275,7 +275,9 @@ class Handler(BaseHTTPRequestHandler):
         """Hand the checked connection to ttyd and copy bytes both ways until either side closes."""
         upstream = socket.socket(socket.AF_UNIX)
         upstream.connect(str(TTYD_SOCKET))
-        upstream.sendall((self.requestline + "\r\n" + str(self.headers) + "\r\n").encode("latin-1"))
+        # Rebuild the handshake exactly; any stray byte after it reads to ttyd as a broken frame and it hangs up.
+        head = self.requestline + "\r\n" + "".join(f"{k}: {v}\r\n" for k, v in self.headers.items()) + "\r\n"
+        upstream.sendall(head.encode("latin-1"))
         client = self.connection
         self.close_connection = True
 
