@@ -21,8 +21,8 @@
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 var(--font); }
-  /* The views fill the body, which is sized to what is visible, so the key bar sits right on the keyboard. */
-  body { position: relative; height: var(--vh, 100dvh); overflow: hidden; }
+  /* The views fill the body, which is pinned to what is visible, so the key bar sits right on the keyboard. */
+  body { position: fixed; left: 0; right: 0; top: var(--vtop, 0); height: var(--vh, 100dvh); overflow: hidden; }
   /* Header buttons read as [Label]. Pressed or armed shows in reverse video. */
   button { font: inherit; color: var(--fg); background: none; border: 0; border-radius: 0; padding: 0 6px;
     min-height: 40px; cursor: pointer; }
@@ -147,13 +147,17 @@ let current = null;  // id of the pane open on the phone
 let lastTitle = {};
 let panes = [], editMode = false, renaming = false;  // the list skips its refresh while a name is being typed
 
-function setViewportHeight() {
-  // iOS keeps the layout height when the keyboard opens; size the page to what is actually visible.
-  document.body.style.setProperty("--vh", `${(window.visualViewport || window).height}px`);
+// iOS keeps the layout height when the keyboard opens, and scrolls the page to show the focused input.
+// Undo the scroll and pin the page to what is actually visible above the keyboard and its accessory bar.
+// The terminal refits when its box changes size, so tmux gets the smaller screen.
+function fitViewport() {
   window.scrollTo(0, 0);
+  const vv = window.visualViewport || { height: window.innerHeight, offsetTop: 0 };
+  document.body.style.setProperty("--vh", `${vv.height}px`);
+  document.body.style.setProperty("--vtop", `${vv.offsetTop}px`);
 }
-(window.visualViewport || window).addEventListener("resize", setViewportHeight);
-setViewportHeight();
+for (const type of ["resize", "scroll"]) (window.visualViewport || window).addEventListener(type, fitViewport);
+fitViewport();
 
 function toast(text) {
   const t = $("toast");
@@ -519,7 +523,12 @@ function startTerminal() {
     if (socket.readyState === WebSocket.OPEN) socket.send(encoder.encode("1" + JSON.stringify({ columns: cols, rows })));
   });
   // Fit to the box whenever it changes size, e.g. when the keyboard opens. Skipped while hidden, which reads as 0 wide.
-  new ResizeObserver(() => { if ($("term-wrap").clientWidth) fit.fit(); }).observe($("term-wrap"));
+  // Waits 50 ms for the size to settle, as the keyboard slides in over several steps.
+  let fitTimer = null;
+  new ResizeObserver(() => {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => { if ($("term-wrap").clientWidth) fit.fit(); }, 50);
+  }).observe($("term-wrap"));
   connect();
 }
 
