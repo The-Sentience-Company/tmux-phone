@@ -49,6 +49,11 @@
   .bar { display: flex; gap: 6px; padding: 6px 8px; overflow-x: auto; border-top: 1px solid var(--line); flex-shrink: 0; }
   .bar button { flex-shrink: 0; min-width: 44px; padding: 8px 10px; }
   #reply { display: flex; gap: 6px; padding: 6px 8px 8px; flex-shrink: 0; }
+  #thumbs { display: flex; gap: 8px; padding: 10px 8px 0; overflow-x: auto; flex-shrink: 0; }
+  .thumb { position: relative; flex-shrink: 0; }
+  .thumb img { height: 64px; border-radius: 8px; display: block; }
+  .thumb button { position: absolute; top: -6px; right: -6px; min-height: 0; min-width: 0; padding: 2px 7px;
+    border-radius: 99px; font-size: 13px; }
   #mic.recording { background: var(--danger); color: #fff; }
   #reply textarea { flex: 1; resize: none; font: inherit; color: var(--fg); background: var(--card);
     border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; height: 42px; max-height: 120px; }
@@ -92,10 +97,13 @@
     <button data-key="alt+p">Model</button>
     <button data-key="ctrl+c">Ctrl-C</button>
   </div>
+  <div id="thumbs" class="hidden"></div>
   <form id="reply">
+    <button id="attach" type="button" aria-label="Add photo">Photo</button>
+    <input type="file" id="file" accept="image/*" multiple hidden>
     <textarea id="text" rows="1" placeholder="Message" autocomplete="off"></textarea>
     <button id="mic" type="button" aria-label="Dictate">Mic</button>
-    <button class="primary" type="submit">Send</button>
+    <button id="send" class="primary" type="submit">Send</button>
   </form>
 </section>
 
@@ -194,6 +202,7 @@ async function showList() {
   unsent = null;
   setMic("Mic");
   $("text").value = "";
+  clearImages();
   if (current) await act(`/api/panes/${current}/back`);
   current = null;
   $("pane").classList.add("hidden");
@@ -221,11 +230,64 @@ document.querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click
   act(`/api/panes/${current}/key`, { key: b.dataset.key });
 }));
 
+// Photos wait as thumbnails until Send. The Mac saves them and pastes their paths after the text,
+// which Claude Code turns into image attachments.
+let images = [];  // [{url, b64}]
+
+async function addImage(file) {
+  // Redrawing on a canvas turns HEIC into JPEG and keeps big photos small; Claude downsizes past ~1600px anyway.
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 2000 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
+  const b64 = await new Promise((r) => {
+    const reader = new FileReader();
+    reader.onload = () => r(reader.result.split(",")[1]);
+    reader.readAsDataURL(blob);
+  });
+  images.push({ url: URL.createObjectURL(blob), b64 });
+}
+
+function renderThumbs() {
+  $("thumbs").innerHTML = "";
+  images.forEach((img, i) => {
+    const d = document.createElement("div");
+    d.className = "thumb";
+    d.innerHTML = `<img src="${img.url}" alt=""><button type="button" aria-label="Remove photo">×</button>`;
+    d.querySelector("button").onclick = () => { URL.revokeObjectURL(img.url); images.splice(i, 1); renderThumbs(); };
+    $("thumbs").appendChild(d);
+  });
+  $("thumbs").classList.toggle("hidden", !images.length);
+}
+
+function clearImages() {
+  images.forEach((img) => URL.revokeObjectURL(img.url));
+  images = [];
+  renderThumbs();
+}
+
+$("attach").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", async () => {
+  for (const f of $("file").files) await addImage(f).catch((e) => toast(`Couldn't read ${f.name}: ${e.message}`));
+  $("file").value = "";
+  renderThumbs();
+});
+
 $("reply").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = $("text").value;
-  if (!text.trim()) return;
-  if (await act(`/api/panes/${current}/send`, { text })) $("text").value = "";
+  if (!text.trim() && !images.length) return;
+  $("send").disabled = true;
+  $("send").textContent = images.length ? "Sending…" : "Send";
+  if (await act(`/api/panes/${current}/send`, { text, images: images.map((i) => i.b64) })) {
+    $("text").value = "";
+    clearImages();
+  }
+  $("send").disabled = false;
+  $("send").textContent = "Send";
 });
 
 // Tap Mic to record, tap Stop to end. The Mac transcribes it and the text lands in the box to check before Send.

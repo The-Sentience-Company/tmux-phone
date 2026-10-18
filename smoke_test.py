@@ -135,6 +135,23 @@ def main():
             raise AssertionError(f"{MARK} never printed in the pane")
         check("message box runs a command in the pane", send)
 
+        def image():
+            # 1x1 PNG. `wc -c` plus the path the server appends prints the saved file's size and path.
+            png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+            status, body = request(f"/api/panes/{pane}/send", {"text": "wc -c", "images": [base64.b64encode(png).decode()]})
+            assert status == 200, f"{status}: {body[:200]!r}"
+            for _ in range(20):
+                saved = [l.split()[-1] for l in tmux("capture-pane", "-p", "-t", f"%{pane}").splitlines()
+                         if "/uploads/" in l and l.split()[0].isdigit()]
+                if saved:
+                    with open(saved[-1], "rb") as f:
+                        assert f.read() == png, f"{saved[-1]} does not hold the image that was sent"
+                    os.unlink(saved[-1])
+                    return
+                time.sleep(0.1)
+            raise AssertionError("the pane never received a saved image path")
+        check("photo arrives in the pane as a saved file", image)
+
         def terminal():
             status, text = terminal_stream(ORIGIN, seconds=3)
             assert " 101 " in status, f"websocket handshake: {status}"

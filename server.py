@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Phone UI for the tmux session on this Mac, served on the tailnet via `tailscale serve`."""
+import base64
 import json
 import os
 import re
@@ -23,6 +24,10 @@ TTYD_SOCKET = STATE / "ttyd.sock"
 INDEX = Path(__file__).resolve().parent / "static/index.html"
 MAX_BODY = 64 * 1024
 MAX_AUDIO = 25 * 1024 * 1024
+MAX_IMAGES = 20 * 1024 * 1024  # all images in one message, before base64
+UPLOADS = STATE / "uploads"
+UPLOAD_DAYS = 7
+IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg", b"GIF87a": "gif", b"GIF89a": "gif"}
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 WHISPER_HOST, WHISPER_PORT = "127.0.0.1", 8767
 
@@ -149,6 +154,22 @@ def transcribe(audio):
     return " ".join(json.loads(data)["text"].split())
 
 
+def save_upload(data):
+    """Store a phone image where Claude Code can read it; only real image bytes are accepted. Old ones are deleted."""
+    ext = next((e for magic, e in IMAGE_TYPES.items() if data.startswith(magic)), None)
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        ext = "webp"
+    if not ext:
+        return None
+    UPLOADS.mkdir(parents=True, exist_ok=True)
+    for old in UPLOADS.glob("*"):
+        if old.stat().st_mtime < time.time() - UPLOAD_DAYS * 86400:
+            old.unlink(missing_ok=True)
+    path = UPLOADS / f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(3).hex()}.{ext}"
+    path.write_bytes(data)
+    return path
+
+
 def unzoom(pane):
     if pane_info(pane, "window_zoomed_flag") == ["1"]:
         tmux("resize-pane", "-Z", "-t", pane)
@@ -210,7 +231,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(502, {"error": f"transcription failed: {e}"})
         if not self.allowed(needs_origin=True) or content_type != "application/json":
             return self.reply(403, {"error": "forbidden"})
-        if length > MAX_BODY:
+        if length > (MAX_IMAGES * 4 // 3 + MAX_BODY if self.path.endswith("/send") else MAX_BODY):
             return self.reply(413, {"error": "too large"})
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -225,9 +246,22 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "back":
                 unzoom(pane)
             elif action == "send":
-                text = body.get("text")
-                if not isinstance(text, str) or not text.strip():
+                text, images = body.get("text", ""), body.get("images") or []
+                if not isinstance(text, str) or not isinstance(images, list) or not all(isinstance(i, str) for i in images):
+                    return self.reply(400, {"error": "bad message"})
+                if not text.strip() and not images:
                     return self.reply(400, {"error": "empty text"})
+                paths = []
+                for encoded in images:
+                    try:
+                        path = save_upload(base64.b64decode(encoded, validate=True))
+                    except ValueError:
+                        path = None
+                    if not path:
+                        return self.reply(400, {"error": "not an image"})
+                    paths.append(str(path))
+                # Claude Code turns a pasted image path into an attachment, but only at the end of the text.
+                text = " ".join([text.strip(), *paths]).strip()
                 # Bracketed paste, so a multi-line message arrives as one message, then Enter submits it.
                 tmux("load-buffer", "-b", "phone", "-", stdin=text)
                 tmux("paste-buffer", "-p", "-d", "-b", "phone", "-t", pane)
