@@ -40,7 +40,7 @@
   .view { position: absolute; top: env(safe-area-inset-top); left: 0; right: 0; bottom: var(--strip);
     display: flex; flex-direction: column; }
   /* tmux's status line, drawn by the page: the phone's tmux session has its own turned off. */
-  #statusline { position: absolute; left: 0; right: 0; bottom: 0; height: var(--strip); display: flex; gap: 1ch;
+  #statusline { position: absolute; left: 0; right: 0; bottom: 0; height: var(--strip); display: flex; align-items: center; gap: 1ch;
     background: var(--green); color: #000; font-size: 12px; line-height: 20px; padding: 0 1ch; white-space: nowrap; }
   #sl-windows { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .hidden { display: none !important; }
