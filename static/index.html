@@ -51,7 +51,7 @@
   .chip.needs_you { color: var(--red); font-weight: bold; } .chip.working { color: var(--green); } .chip.idle { color: var(--dim); }
   .pane:active .chip { color: inherit; }
   #list-error { color: var(--red); padding: 8px; }
-  /* Edit mode: [rn] [+pane] [x] at the end of each row, and a [+window] row at the bottom. */
+  /* Edit mode: [rename] [add pane] [close] at the end of each row, and an [add window] row at the bottom. */
   .window-name, .pane .top { display: flex; align-items: center; gap: 8px; }
   .window-name { gap: 0; } .window-name .name { margin-left: 1ch; }
   .window-name .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -210,23 +210,23 @@ function renderPanes() {
     if (!windows.has(p.window)) windows.set(p.window, { id: p.window_id, name: p.window_name, panes: [] });
     windows.get(p.window).panes.push(p);
   }
-  const addWindow = editMode ? `<button class="br primary add-window" data-act="new-window">+window</button>` : "";
+  const addWindow = editMode ? `<button class="br primary add-window" data-act="new-window">add window</button>` : "";
   if (!panes.length) {
-    $("list-body").innerHTML = `<div class="window-name">No tmux panes. Tap [edit], then [+window].</div>${addWindow}`;
+    $("list-body").innerHTML = `<div class="window-name">No tmux panes. Tap [edit], then [add window].</div>${addWindow}`;
     return;
   }
   const chip = (p) => p.status ? `<span class="chip ${p.status}">${STATUS_LABEL[p.status]}</span>` : "";
   $("list-body").innerHTML = [...windows].map(([index, w]) => `
     <div class="window-name">
       <span>${index}:</span><span class="name rn-target">${esc(w.name)}</span>
-      ${editMode ? `<span class="acts"><button class="br" data-act="rename-window" data-id="${w.id}">rn</button><button class="br primary" data-act="add-pane" data-id="${w.id}">+pane</button></span>` : ""}
+      ${editMode ? `<span class="acts"><button class="br" data-act="rename-window" data-id="${w.id}">rename</button><button class="br primary" data-act="add-pane" data-id="${w.id}">add pane</button></span>` : ""}
     </div>
     ${w.panes.map((p) => editMode ? `
       <div class="pane">
         <div class="top">
           <span class="title rn-target">${esc(p.title || p.command)}</span>
           ${chip(p)}
-          <span class="acts"><button class="br" data-act="rename-pane" data-id="${p.id}">rn</button><button class="br danger" data-act="close-pane" data-id="${p.id}">x</button></span>
+          <span class="acts"><button class="br" data-act="rename-pane" data-id="${p.id}">rename</button><button class="br danger" data-act="close-pane" data-id="${p.id}">close</button></span>
         </div>
         <div class="line">${esc(p.last_line || " ")}</div>
       </div>` : `
@@ -239,7 +239,7 @@ function renderPanes() {
       </button>`).join("")}`).join("") + addWindow;
 }
 
-// [rn] swaps the name for a text box. Enter saves; Escape or tapping away keeps the old name.
+// [rename] swaps the name for a text box. Enter saves; Escape or tapping away keeps the old name.
 function rename(target, name, path) {
   renaming = true;
   const input = Object.assign(document.createElement("input"), {
