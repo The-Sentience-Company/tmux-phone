@@ -49,7 +49,8 @@ MAX_NAME = 100
 KEYS = {"enter": "Enter", "escape": "Escape", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
         "tab": "Tab", "shift+tab": "BTab", "ctrl+c": "C-c", "alt+p": "M-p", "1": "1", "2": "2", "3": "3"}
 PANE_FIELDS = ["pane_id", "window_id", "window_index", "window_name", "pane_index", "pane_title", "pane_tty", "pane_active",
-               "window_active", "window_zoomed_flag", "window_panes", "pane_current_command", "mouse_any_flag"]
+               "window_active", "window_zoomed_flag", "window_panes", "pane_current_command", "mouse_any_flag",
+               "pane_top", "pane_height", "window_height", "pane-border-status"]
 
 # Claude Code draws its conversation, a rule, the ❯ input line, then a footer.
 RULE = re.compile(r"^\s*─{8,}")
@@ -216,10 +217,22 @@ def list_panes():
             "active": p["pane_active"] == "1" and p["window_active"] == "1",
             # The app reads the mouse, so tmux hands it the wheel; if not, the wheel scrolls tmux's copy mode.
             "reads_mouse": p["mouse_any_flag"] == "1",
+            "border": border_row(p),
             "status": status(lines) if is_claude else None,
             "last_line": last_line(lines) if is_claude else next((l.strip() for l in reversed(lines) if l.strip()), ""),
         })
     return panes
+
+
+def border_row(p):
+    """Which edge of the window holds tmux's pane title row next to this pane: "top", "bottom" or None.
+    Only from tmux's own option and geometry. The phone hides that row, as it shows one pane at a time."""
+    top, height, window_height = int(p["pane_top"]), int(p["pane_height"]), int(p["window_height"])
+    if p["pane-border-status"] == "top" and top == 1:
+        return "top"
+    if p["pane-border-status"] == "bottom" and top + height == window_height - 1:
+        return "bottom"
+    return None
 
 
 def pane_info(pane, *fields):
@@ -235,6 +248,8 @@ def open_pane(pane):
     panes, zoomed = pane_info(pane, "window_panes", "window_zoomed_flag")
     if panes != "1" and zoomed == "0":
         tmux("resize-pane", "-Z", "-t", pane)
+    fields = ["pane_top", "pane_height", "window_height", "pane-border-status"]
+    return border_row(dict(zip(fields, pane_info(pane, *fields))))
 
 
 def transcribe(audio):
@@ -401,7 +416,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(404, {"error": "not found"})
             pane, action = f"%{m[1]}", m[2]
             if action == "open":
-                open_pane(pane)
+                return self.reply(200, {"ok": True, "border": open_pane(pane)})
             elif action == "back":
                 unzoom(pane)
             elif action == "paste":

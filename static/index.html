@@ -80,7 +80,7 @@
   .rename { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--green);
     border-radius: 0; padding: 0 4px; outline: none; }
 
-  #term-wrap { flex: 1; min-height: 0; background: #000; position: relative; touch-action: none; }
+  #term-wrap { flex: 1; min-height: 0; background: #000; position: relative; touch-action: none; overflow: hidden; }
   #term { width: 100%; height: 100%; }
   .bar { display: flex; overflow-x: auto; border-top: 1px solid var(--line); flex-shrink: 0; scrollbar-width: none; }
   .bar::-webkit-scrollbar { display: none; }
@@ -225,6 +225,8 @@ async function loadPanes() {
   panes = fresh.panes;
   sessions = fresh.sessions;
   if (fresh.version !== VERSION) reloadWhenSafe();
+  const open = panes.find((p) => p.id === current);
+  if (open) hideBorderRow(open.border);
   for (const p of panes) lastTitle[p.id] = p.title || p.command;
   if (!renaming) renderPanes();
 }
@@ -367,7 +369,8 @@ function reloadWhenSafe() {
 }
 
 async function openPane(id) {
-  if (!(await act(`/api/panes/${id}/open`))) return;
+  const r = await act(`/api/panes/${id}/open`);
+  if (!r) return;
   current = id;
   atBottom();
   $("pane-title").textContent = lastTitle[id] || "";
@@ -375,6 +378,7 @@ async function openPane(id) {
   $("pane").classList.remove("hidden");
   // One terminal connection for the whole visit; tmux switches what it shows.
   if (!socket) startTerminal();
+  hideBorderRow(r.border);
   loadPanes();
 }
 
@@ -643,7 +647,23 @@ function setFontSize(size) {
   if (size === term.options.fontSize) return;
   term.options.fontSize = size;
   fit.fit();  // the new columns and rows go to ttyd through onResize, and tmux re-fits the window
+  hideBorderRow(hiddenRow);  // one row is now a different height
   try { localStorage.setItem(FONT_KEY, String(size)); } catch {}
+}
+
+// tmux's pane title row (pane-border-status) is one row above or below the pane. The phone shows one pane, so it
+// hides that row: the terminal gets one more row than fits, and that row sits outside #term-wrap, which clips it.
+// tmux gets the full row count, so its layout stays right. Wheel rows come from the screen's real box, hidden row included.
+let hiddenRow = null;  // "top", "bottom" or null, as the server reports it for the open pane
+function hideBorderRow(border) {
+  hiddenRow = border || null;
+  if (!term.element || !$("term-wrap").clientHeight) return;
+  const rowPx = term.element.querySelector(".xterm-screen").getBoundingClientRect().height / term.rows;
+  if (!rowPx) return;
+  const height = hiddenRow ? `calc(100% + ${rowPx}px)` : "", top = hiddenRow === "top" ? `-${rowPx}px` : "";
+  if ($("term").style.height === height && $("term").style.marginTop === top) return;
+  Object.assign($("term").style, { height, marginTop: top });
+  fit.fit();
 }
 
 function atBottom() {
