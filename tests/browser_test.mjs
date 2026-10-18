@@ -160,11 +160,11 @@ async function swipeDown(page, px) {
   }, px);
 }
 
-// Two fingers spreading apart vertically from the middle of the terminal. The first finger moves down,
-// so a page that took it for a one-finger swipe would send wheel-up and scroll the pane back.
-async function pinchOut(page, px) {
-  await page.evaluate(async (px) => {
-    const box = document.querySelector(".xterm").getBoundingClientRect();
+// Two fingers spreading apart vertically from the middle of the terminal, or of another element. The first finger
+// moves down, so a page that took it for a one-finger swipe would send wheel-up and scroll the pane back.
+async function pinchOut(page, px, selector = ".xterm") {
+  await page.evaluate(async ([px, selector]) => {
+    const box = document.querySelector(selector).getBoundingClientRect();
     const x = box.left + box.width / 2, yc = box.top + box.height / 2;
     const target = document.elementFromPoint(x, yc);
     const touch = (id, y) => document.createTouch(window, target, id, x, y, x, y);
@@ -184,7 +184,7 @@ async function pinchOut(page, px) {
     }
     fire("touchend", [a], [b]);
     fire("touchend", [], [a]);
-  }, px);
+  }, [px, selector]);
 }
 
 async function main() {
@@ -459,6 +459,200 @@ async function main() {
       tmux("set-option", "-wu", "-t", pane, "pane-border-status");
     });
 
+    // A folder for the file screen, and the pane's shell in it. tmux reports /tmp as /private/tmp, so compare real paths.
+    const proj = path.join(fs.realpathSync(base), "project-folder");
+    fs.mkdirSync(path.join(proj, "sub"), { recursive: true });
+    fs.writeFileSync(path.join(proj, ".hidden"), "secret\n");
+    fs.writeFileSync(path.join(proj, "a.txt"), "plain text\n");
+    fs.writeFileSync(path.join(proj, "b.py"), "def hello():\n    return 'hi'  # greet\n");
+    fs.writeFileSync(path.join(proj, "Big.log"), Buffer.alloc(3 * 1024 * 1024, 97));
+    fs.writeFileSync(path.join(proj, "nul.dat"), Buffer.from("ab\0cd"));
+    const bpy = path.join(proj, "b.py");
+    const entryLabels = () => page.evaluate(() => [...document.querySelectorAll("#folder .entry")].map((b) => b.textContent));
+    const tapEntry = (label) => page.tap(`#folder .entry:text-is("${label}")`);
+    const fileText = () => page.evaluate(() => file && file.view ? file.view.state.doc.toString() : null);
+
+    await check("[files] opens the pane's folder: .. first, then folders, then files by name, hidden files too", async () => {
+      tmux("send-keys", "-t", pane, `cd '${proj}'; clear`, "Enter");
+      await waitFor(() => paneInfo(pane, "pane_current_path") === proj, 5000, `the pane in ${proj} (is ${paneInfo(pane, "pane_current_path")})`);
+      const labels = await page.evaluate(() => [...document.querySelectorAll("#pane-header button")].map((b) => b.textContent));
+      assert(JSON.stringify(labels) === JSON.stringify(["‹ Panes", "files", "Close"]), `pane header buttons: ${labels}`);
+      await page.tap("#files-open");
+      await page.waitForSelector("#files:not(.hidden) #folder .entry");
+      const got = await entryLabels(), want = ["..", "sub/", ".hidden", "a.txt", "b.py", "Big.log", "nul.dat"];
+      assert(JSON.stringify(got) === JSON.stringify(want), `rows: ${JSON.stringify(got)}`);
+    });
+
+    await check("the folder's path is at the top, cut from the left so its end shows", async () => {
+      const t = await page.evaluate(() => {
+        const h = $("files-title"), r = document.createRange(), text = h.firstChild;
+        r.setStart(text, text.length - "project-folder".length);
+        r.setEnd(text, text.length);
+        const e = r.getBoundingClientRect(), b = h.getBoundingClientRect();
+        return { text: h.textContent, cut: h.scrollWidth > h.clientWidth, endShows: e.left >= b.left - 1 && e.right <= b.right + 1 };
+      });
+      assert(t.text.endsWith(proj), `title is ${JSON.stringify(t.text)}`);
+      assert(t.endShows, `the end of the path is not on screen: ${JSON.stringify(t)}`);
+    });
+
+    await check("[‹ back] on a folder goes into it and back out with .., then [‹ back] returns to the pane", async () => {
+      await tapEntry("sub/");
+      await waitFor(async () => JSON.stringify(await entryLabels()) === '[".."]', 5000, `sub's rows (${await entryLabels()})`);
+      assert((await page.textContent("#files-title")).endsWith("/sub"), "the title is not sub's path");
+      await tapEntry("..");
+      await waitFor(async () => (await entryLabels()).includes("b.py"), 5000, "the project folder again");
+      await page.tap("#files-back");
+      await page.waitForSelector("#pane:not(.hidden)");
+      assert(await page.locator("#files").isHidden(), "the file screen still shows");
+      await page.tap("#files-open");
+      await page.waitForSelector('#folder .entry:text-is("b.py")');
+    });
+
+    await check("tapping a file shows its text highlighted, with line numbers, read-only; [‹ back] b.py [edit]", async () => {
+      await tapEntry("b.py");
+      await page.waitForSelector("#file-body .cm-content");
+      await waitFor(async () => (await page.textContent("#file-body .cm-content")).includes("def hello():"), 5000, "the file's text");
+      const look = await page.evaluate(() => ({
+        keyword: getComputedStyle(document.querySelector("#file-body .tok-keyword")).color,
+        comment: getComputedStyle(document.querySelector("#file-body .tok-comment")).color,
+        plain: getComputedStyle(document.querySelector("#file-body .cm-content")).color,
+        background: getComputedStyle(document.querySelector("#file-body .cm-editor")).backgroundColor,
+        numbers: [...document.querySelectorAll("#file-body .cm-lineNumbers .cm-gutterElement")].map((e) => e.textContent).filter(Boolean),
+        editable: document.querySelector("#file-body .cm-content").getAttribute("contenteditable"),
+        header: [...document.querySelectorAll("#files header > *")].filter((e) => !e.classList.contains("hidden")).map((e) => e.textContent),
+      }));
+      assert(look.keyword !== look.plain && look.comment !== look.plain, `no highlighting: ${JSON.stringify(look)}`);
+      assert(look.background === "rgb(0, 0, 0)", `background ${look.background}`);
+      assert(look.numbers.includes("1") && look.numbers.includes("2"), `line numbers ${look.numbers}`);
+      assert(look.editable === "false", `contenteditable=${look.editable}`);
+      assert(JSON.stringify(look.header) === JSON.stringify(["‹ back", "b.py", "edit"]), `header: ${look.header}`);
+    });
+
+    await check("the file's text can be selected", async () => {
+      const selected = await page.evaluate(async () => {
+        const line = document.querySelector("#file-body .cm-line");
+        getSelection().selectAllChildren(line);
+        await new Promise((r) => setTimeout(r, 300));
+        return { text: getSelection().toString(), userSelect: getComputedStyle(line).webkitUserSelect || getComputedStyle(line).userSelect };
+      });
+      assert(selected.text.includes("def hello():"), `selection is ${JSON.stringify(selected.text)}`);
+      assert(selected.userSelect !== "none", "user-select is none");
+      await page.evaluate(() => getSelection().removeAllRanges());
+    });
+
+    await check("pinching the file grows its font, and the size is the terminal's setting", async () => {
+      const size = () => page.evaluate(() => parseFloat(getComputedStyle(document.querySelector("#file-body .cm-content")).fontSize));
+      await page.evaluate(() => setFontSize(13));  // the terminal's pinch check may have left it at the largest
+      const before = await size();
+      await pinchOut(page, 40, "#file-body");
+      const after = await size();
+      assert(after > before, `font size went from ${before} to ${after}`);
+      assert(await page.evaluate(() => localStorage.getItem("tmux-phone.fontSize")) === String(after), "the size was not saved");
+      assert(await page.evaluate(() => term.options.fontSize) === after, "the terminal's size is not the same");
+    });
+
+    await check("[edit] makes it editable and focuses it; typing, then [save], changes the file on disk", async () => {
+      await page.tap("#file-edit");
+      assert((await page.textContent("#file-edit")) === "save", "the button does not say save");
+      const focus = await page.evaluate(() => ({ editable: document.querySelector("#file-body .cm-content").getAttribute("contenteditable"),
+                                                 focused: document.activeElement.classList.contains("cm-content") }));
+      assert(focus.editable === "true" && focus.focused, `after [edit]: ${JSON.stringify(focus)}`);
+      await page.keyboard.type("# phone edit\n");
+      await waitFor(async () => (await fileText()).startsWith("# phone edit\n"), 3000, `the typed line (${JSON.stringify(await fileText())})`);
+      await page.tap("#file-edit");
+      await waitFor(() => fs.readFileSync(bpy, "utf8") === "# phone edit\ndef hello():\n    return 'hi'  # greet\n", 5000,
+                    `the file on disk (is ${JSON.stringify(fs.readFileSync(bpy, "utf8"))})`);
+      await page.waitForSelector('#file-edit:text-is("edit")');
+      assert(await page.evaluate(() => document.querySelector("#file-body .cm-content").getAttribute("contenteditable")) === "false",
+             "still editable after the save");
+    });
+
+    await check("a save is refused if the file changed on disk, and the disk's version stays", async () => {
+      await page.tap("#file-edit");
+      await page.keyboard.type("phone change ");
+      fs.writeFileSync(bpy, "changed on the Mac\n");
+      await page.tap("#file-edit");
+      await page.waitForSelector('#toast:not(.hidden):has-text("changed on disk")', { timeout: 5000 });
+      assert(fs.readFileSync(bpy, "utf8") === "changed on the Mac\n", `the file is ${JSON.stringify(fs.readFileSync(bpy, "utf8"))}`);
+      assert((await page.textContent("#file-edit")) === "save", "the button left edit mode");
+      assert((await fileText()).includes("phone change "), "the phone's changes are gone from the screen");
+    });
+
+    await check("leaving with unsaved changes asks first: cancel stays, OK goes to the folder", async () => {
+      let message = "";
+      page.once("dialog", (d) => { message = d.message(); d.dismiss(); });
+      await page.tap("#files-back");
+      await sleep(300);
+      assert(/without saving/.test(message), `the confirm said: ${JSON.stringify(message)}`);
+      assert(await page.locator("#file-body .cm-content").isVisible(), "cancel left the file");
+      page.once("dialog", (d) => d.accept());
+      await page.tap("#files-back");
+      await page.waitForSelector('#folder:not(.hidden) .entry:text-is("b.py")');
+      assert(fs.readFileSync(bpy, "utf8") === "changed on the Mac\n", "leaving wrote the file");
+    });
+
+    await check("a big file and a binary file show a one-line note instead of their text", async () => {
+      await tapEntry("Big.log");
+      await page.waitForSelector('#file-note:not(.hidden):has-text("too big")');
+      assert(await page.locator("#file-edit").isHidden(), "[edit] shows for a big file");
+      await page.tap("#files-back");
+      await tapEntry("nul.dat");
+      await page.waitForSelector('#file-note:not(.hidden):has-text("binary")');
+      await page.tap("#files-back");
+      await page.waitForSelector('#folder:not(.hidden) .entry:text-is("b.py")');
+      await page.tap("#files-back");
+      await page.waitForSelector("#pane:not(.hidden)");
+    });
+
+    await check("the save route checks the Origin, like every POST", async () => {
+      const r = await fetch(`http://127.0.0.1:${port}/api/file`, { method: "POST",
+        headers: { "Tailscale-User-Login": LOGIN, Origin: "https://evil.example", "Content-Type": "application/json" },
+        body: JSON.stringify({ path: bpy, text: "evil", mtime: "0" }) });
+      assert(r.status === 403, `got ${r.status}`);
+    });
+
+    const hasNvim = (() => { try { execFileSync("nvim", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
+    await check("in a pane running nvim, [files] opens nvim's file, and a save reloads it in nvim", async () => {
+      if (!hasNvim) return console.log("  (nvim not installed, skipped)");
+      const atxt = path.join(proj, "a.txt");
+      const vim = tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "test:", "-n", "vim", "-c", proj,
+                       "nvim", "--clean", "a.txt").trim();
+      try {
+        // nvim's first line, asked through the socket nvim opened by itself, which the server must find the same way.
+        const firstLine = () => {
+          try {
+            const child = execFileSync("pgrep", ["-P", paneInfo(vim, "pane_pid")], { encoding: "utf8" }).trim();
+            const tmp = process.env.TMPDIR || "/tmp";
+            const sock = fs.readdirSync(tmp).filter((d) => d.startsWith("nvim.")).flatMap((d) =>
+              fs.readdirSync(path.join(tmp, d)).map((r) => path.join(tmp, d, r, `nvim.${child}.0`))).find((f) => fs.existsSync(f));
+            return execFileSync("nvim", ["--server", sock, "--remote-expr", "getline(1)"], { encoding: "utf8" });
+          } catch { return null; }
+        };
+        await waitFor(() => firstLine() === "plain text", 10000, "nvim to open a.txt");
+        await page.tap("#back");
+        await page.tap(`button[data-pane="${vim.slice(1)}"]`);
+        await page.waitForSelector("#pane:not(.hidden)");
+        await page.tap("#files-open");
+        await page.waitForSelector("#file-body .cm-content");
+        assert((await page.textContent("#files-title")) === "a.txt", `title ${await page.textContent("#files-title")}`);
+        await page.tap("#file-edit");
+        await page.keyboard.type("from the phone\n");
+        await page.tap("#file-edit");
+        await waitFor(() => fs.readFileSync(atxt, "utf8") === "from the phone\nplain text\n", 5000, "the save on disk");
+        await waitFor(() => firstLine() === "from the phone", 5000, "nvim to reload the file");
+        await page.tap("#files-back");
+        await waitFor(async () => (await page.textContent("#files-title")).endsWith(proj), 5000,
+                      `the file's folder after [‹ back] (title ${await page.textContent("#files-title")})`);
+        await page.tap("#files-back");
+      } finally {
+        tmux("kill-pane", "-t", vim);
+        await page.goto("/");  // back to the list from wherever the check stopped
+        await page.waitForSelector(`button[data-pane="${vim.slice(1)}"]`, { state: "detached" });
+        await page.tap(`button[data-pane="${paneId}"]`);
+        await page.waitForSelector("#pane:not(.hidden)");
+      }
+    });
+
     const windowId = paneInfo(pane, "window_id").slice(1);
     const tapAct = (act, id) => page.tap(`#list-body [data-act="${act}"]${id ? `[data-id="${id}"]` : ""}`);
     const renames = [];
@@ -633,6 +827,29 @@ async function main() {
       await page.keyboard.press("Escape");
       await waitFor(reloaded, 10000, "the page to reload after the rename");
       await page.waitForSelector("#edit:text-is(\"edit\")");
+      await page.waitForSelector(`button[data-pane="${paneId}"]`);
+    });
+
+    await check("a new version waits while a file has unsaved changes, then reloads back onto the file", async () => {
+      await page.tap(`button[data-pane="${paneId}"]`);
+      await page.waitForSelector("#pane:not(.hidden)");
+      await page.tap("#files-open");
+      await page.tap('#folder .entry:text-is("b.py")');
+      await page.waitForSelector("#file-body .cm-content");
+      await page.tap("#file-edit");
+      await page.keyboard.type("unsaved ");
+      await mark();
+      deploy();
+      await sleep(4000);
+      assert(!(await reloaded()), "the page reloaded with unsaved changes");
+      await page.tap("#file-edit");
+      await waitFor(reloaded, 10000, "the page to reload after the save");
+      await page.waitForSelector("#files:not(.hidden) #file-body .cm-content", { timeout: 10000 });
+      assert((await page.textContent("#files-title")) === "b.py", `the file screen shows ${await page.textContent("#files-title")}`);
+      assert(fs.readFileSync(path.join(fs.realpathSync(base), "project-folder/b.py"), "utf8").startsWith("unsaved "), "the save did not land");
+      await page.tap("#files-back");
+      await page.tap("#files-back");
+      await page.tap("#back");
       await page.waitForSelector(`button[data-pane="${paneId}"]`);
     });
 
