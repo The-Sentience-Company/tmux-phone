@@ -15,7 +15,7 @@
 <style>
   :root {
     --bg: #000; --fg: #d0d0d0; --dim: #767676; --line: #303030;
-    --green: #5fd75f; --red: #ff5f5f; --yellow: #d7d75f;
+    --green: #5fd75f; --red: #ff5f5f; --yellow: #d7d75f; --cyan: #5fd7d7;
     --font: Menlo, ui-monospace, "SF Mono", monospace;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -24,11 +24,11 @@
   /* The status bar text is white; keep the strip behind it black. */
   body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; height: env(safe-area-inset-top);
     background: #000; pointer-events: none; }
-  /* Buttons read as [Label]. Pressed or armed shows in reverse video. */
+  /* Header buttons read as [Label]. Pressed or armed shows in reverse video. */
   button { font: inherit; color: var(--fg); background: none; border: 0; border-radius: 0; padding: 0 6px;
     min-height: 40px; cursor: pointer; }
-  header button::before, .bar button::before { content: "["; color: var(--dim); }
-  header button::after, .bar button::after { content: "]"; color: var(--dim); }
+  header button::before { content: "["; color: var(--dim); }
+  header button::after { content: "]"; color: var(--dim); }
   button:active, button.armed { background: var(--fg); color: var(--bg); }
   button:active::before, button:active::after, button.armed::before, button.armed::after { color: inherit; }
   button:disabled { color: var(--dim); }
@@ -60,7 +60,13 @@
     pointer-events: none; z-index: 5; }
   .bar { display: flex; overflow-x: auto; border-top: 1px solid var(--line); flex-shrink: 0; scrollbar-width: none; }
   .bar::-webkit-scrollbar { display: none; }
-  .bar button { flex-shrink: 0; min-height: 44px; padding: 0 5px; }
+  /* The key bar is one row of short glyphs in three groups, split by dim bars. */
+  .bar { align-items: center; }
+  .bar button { flex-shrink: 0; min-width: 40px; min-height: 44px; padding: 0 6px; white-space: nowrap; }
+  .bar .input { color: var(--cyan); }
+  .bar .mod { color: var(--yellow); }
+  .bar button:active, .bar button.armed { background: var(--fg); color: var(--bg); }
+  .bar .sep { flex-shrink: 0; color: var(--line); padding: 0 1px; user-select: none; -webkit-user-select: none; }
   #mic.recording { background: var(--red); color: var(--bg); }
   #toast { position: fixed; left: 8px; right: 8px; bottom: 120px; background: var(--bg); color: var(--fg);
     border: 1px solid var(--green); padding: 6px 8px; z-index: 10; }
@@ -84,13 +90,15 @@
   </header>
   <div id="term-wrap"><div id="term"></div><div id="term-status" class="hidden">[reconnecting…]</div></div>
   <div class="bar">
-    <button data-mod="ctrl">Ctrl</button>
-    <button data-mod="alt">Alt</button>
-    <button id="mic" aria-label="Dictate">Mic</button>
-    <button id="attach" aria-label="Add photo">Photo</button>
+    <button id="mic" class="input" aria-label="Mic">●</button>
+    <button id="attach" class="input" aria-label="Photo">▣</button>
     <input type="file" id="file" accept="image/*" multiple hidden>
-    <button data-key="escape">Esc</button>
-    <button data-key="enter">Enter</button>
+    <button data-key="enter" class="primary" aria-label="Enter">⏎</button>
+    <span class="sep" aria-hidden="true">│</span>
+    <button data-mod="ctrl" class="mod" aria-label="Ctrl">^</button>
+    <button data-mod="alt" class="mod" aria-label="Alt">⌥</button>
+    <span class="sep" aria-hidden="true">│</span>
+    <button data-key="escape" aria-label="Esc">esc</button>
     <button data-key="up">↑</button>
     <button data-key="down">↓</button>
     <button data-key="left">←</button>
@@ -98,10 +106,10 @@
     <button data-key="1">1</button>
     <button data-key="2">2</button>
     <button data-key="3">3</button>
-    <button data-key="tab">Tab</button>
-    <button data-key="shift+tab">⇧Tab</button>
-    <button data-key="alt+p">Model</button>
-    <button data-key="ctrl+c">Ctrl-C</button>
+    <button data-key="tab" aria-label="Tab">⇥</button>
+    <button data-key="shift+tab" aria-label="Shift-Tab">⇧⇥</button>
+    <button data-key="ctrl+c" class="danger" aria-label="Ctrl-C">^C</button>
+    <button data-key="alt+p" aria-label="Model">model</button>
   </div>
 </section>
 
@@ -201,7 +209,7 @@ async function showList() {
   stopRecording(true);
   disarm();
   unsent = null;
-  setMic("Mic");
+  setMic("●");
   if (current) await act(`/api/panes/${current}/back`);
   current = null;
   $("pane").classList.add("hidden");
@@ -282,15 +290,15 @@ $("attach").addEventListener("click", () => $("file").click());
 $("file").addEventListener("change", async () => {
   const pane = current, images = [];
   $("attach").disabled = true;
-  $("attach").textContent = "Sending…";
+  $("attach").textContent = "…";
   for (const f of $("file").files) await photoBase64(f).then((b) => images.push(b), (e) => toast(`Couldn't read ${f.name}: ${e.message}`));
   $("file").value = "";
   if (images.length && pane === current) await act(`/api/panes/${pane}/paste`, { images });
   $("attach").disabled = false;
-  $("attach").textContent = "Photo";
+  $("attach").textContent = "▣";
 });
 
-// Tap Mic to record, tap Stop to end. The Mac transcribes it and pastes the text into the pane, without Enter.
+// Tap Mic to record, tap it again to end. The Mac transcribes it and pastes the text into the pane, without Enter.
 // A recording that fails to transcribe or paste is kept, and Mic becomes Retry, so nothing said is lost.
 let recorder = null, unsent = null, timer = null;
 
@@ -309,7 +317,7 @@ function stopRecording(discard) {
 
 async function sendAudio(audio) {
   const pane = current;
-  setMic("Transcribing…", { busy: true });
+  setMic("…", { busy: true });
   try {
     const r = await fetch("/api/transcribe", { method: "POST", headers: { "Content-Type": audio.type }, body: audio });
     const data = await r.json().catch(() => ({}));
@@ -317,12 +325,12 @@ async function sendAudio(audio) {
     if (pane !== current) return;  // left that pane while it was transcribing
     if (data.text) await post(`/api/panes/${pane}/paste`, { text: data.text });
     unsent = null;
-    setMic("Mic");
+    setMic("●");
     if (!data.text) toast("Didn't catch anything.");
   } catch (e) {
     if (pane !== current) return;
     unsent = audio;
-    setMic("Retry");
+    setMic("retry");
     toast(e.message);
   }
 }
@@ -344,14 +352,14 @@ $("mic").addEventListener("click", async () => {
     clearInterval(timer);
     const { discard, mimeType } = recorder;
     recorder = null;
-    if (discard) return setMic("Mic");
+    if (discard) return setMic("●");
     const type = (mimeType || "audio/mp4").split(";")[0];
     sendAudio(new Blob(chunks, { type }));
   };
   recorder.start();
   const tick = () => {
     const s = Math.floor((Date.now() - started) / 1000);
-    setMic(`Stop ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`, { recording: true });
+    setMic(`● ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`, { recording: true });
   };
   tick();
   timer = setInterval(tick, 1000);
