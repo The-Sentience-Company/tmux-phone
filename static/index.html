@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="tmux">
+<title>tmux</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --line: #e5e5ea; --card: #f5f5f7;
+    --btn: #e9e9ee; --accent: #0a66ff; --accent-fg: #fff; --danger: #d70015;
+    --needs: #d70015; --working: #0a66ff; --idle: #6e6e73;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000; --fg: #f5f5f7; --muted: #98989d; --line: #2c2c2e; --card: #1c1c1e;
+      --btn: #2c2c2e; --accent: #0a84ff; --danger: #ff453a; --needs: #ff453a; --working: #0a84ff; --idle: #98989d;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body { height: var(--vh, 100dvh); overflow: hidden; }
+  button { font: inherit; color: var(--fg); background: var(--btn); border: 0; border-radius: 10px;
+    padding: 10px 12px; min-height: 42px; cursor: pointer; }
+  button:active { opacity: .6; }
+  button.primary { background: var(--accent); color: var(--accent-fg); }
+  button.danger { color: var(--danger); }
+  .view { position: absolute; inset: 0; display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .hidden { display: none !important; }
+  header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  #list-body { flex: 1; overflow-y: auto; padding: 4px 12px 24px; }
+  .window-name { font-size: 13px; color: var(--muted); margin: 16px 4px 6px; text-transform: uppercase; letter-spacing: .03em; }
+  .pane { display: block; width: 100%; text-align: left; background: var(--card); margin-bottom: 8px; padding: 12px; }
+  .pane .top { display: flex; align-items: center; gap: 8px; }
+  .pane .title { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pane .line { color: var(--muted); font-size: 13px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; }
+  .chip.needs_you { color: var(--needs); } .chip.working { color: var(--working); } .chip.idle { color: var(--idle); }
+  #list-error { color: var(--danger); padding: 12px; }
+
+  #term-wrap { flex: 1; min-height: 0; background: #000; }
+  #term { width: 100%; height: 100%; border: 0; display: block; }
+  .bar { display: flex; gap: 6px; padding: 6px 8px; overflow-x: auto; border-top: 1px solid var(--line); flex-shrink: 0; }
+  .bar button { flex-shrink: 0; min-width: 44px; padding: 8px 10px; }
+  #reply { display: flex; gap: 6px; padding: 6px 8px 8px; flex-shrink: 0; }
+  #mic.recording { background: var(--danger); color: #fff; }
+  #reply textarea { flex: 1; resize: none; font: inherit; color: var(--fg); background: var(--card);
+    border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; height: 42px; max-height: 120px; }
+  #toast { position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%); background: var(--fg); color: var(--bg);
+    padding: 8px 14px; border-radius: 10px; font-size: 14px; max-width: 90vw; z-index: 10; }
+</style>
+</head>
+<body>
+
+<section id="list" class="view">
+  <header>
+    <h1>tmux</h1>
+    <button id="new-window" class="primary">New window</button>
+  </header>
+  <div id="list-body"></div>
+</section>
+
+<section id="pane" class="view hidden">
+  <header id="pane-header">
+    <button id="back" aria-label="Back to panes">‹ Panes</button>
+    <h1 id="pane-title"></h1>
+  </header>
+  <div class="bar">
+    <button data-split="right">Split right</button>
+    <button data-split="down">Split down</button>
+    <button id="close-pane" class="danger">Close pane</button>
+  </div>
+  <div id="term-wrap"><iframe id="term" title="Terminal"></iframe></div>
+  <div class="bar">
+    <button data-key="escape">Esc</button>
+    <button data-key="enter">Enter</button>
+    <button data-key="up">↑</button>
+    <button data-key="down">↓</button>
+    <button data-key="left">←</button>
+    <button data-key="right">→</button>
+    <button data-key="1">1</button>
+    <button data-key="2">2</button>
+    <button data-key="3">3</button>
+    <button data-key="tab">Tab</button>
+    <button data-key="shift+tab">⇧Tab</button>
+    <button data-key="alt+p">Model</button>
+    <button data-key="ctrl+c">Ctrl-C</button>
+  </div>
+  <form id="reply">
+    <textarea id="text" rows="1" placeholder="Message" autocomplete="off"></textarea>
+    <button id="mic" type="button" aria-label="Dictate">Mic</button>
+    <button class="primary" type="submit">Send</button>
+  </form>
+</section>
+
+<div id="toast" class="hidden"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const STATUS_LABEL = { needs_you: "Needs you", working: "Working", idle: "Idle" };
+let current = null;  // id of the pane open on the phone
+let lastTitle = {};
+
+function setViewportHeight() {
+  // iOS keeps the layout height when the keyboard opens; size the page to what is actually visible.
+  document.body.style.setProperty("--vh", `${(window.visualViewport || window).height}px`);
+  window.scrollTo(0, 0);
+}
+(window.visualViewport || window).addEventListener("resize", setViewportHeight);
+setViewportHeight();
+
+function toast(text) {
+  const t = $("toast");
+  t.textContent = text;
+  t.classList.remove("hidden");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.add("hidden"), 3000);
+}
+
+async function post(path, body = {}) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
+  return data;
+}
+
+async function act(path, body) {
+  try { return await post(path, body); } catch (e) {
+    toast(e.message);
+    if (/can't find (pane|window)/.test(e.message)) { current = null; showList(); }
+    return null;
+  }
+}
+
+function esc(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function loadPanes() {
+  let panes;
+  try {
+    const r = await fetch("/api/panes");
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `Request failed (${r.status})`);
+    panes = (await r.json()).panes;
+  } catch (e) {
+    $("list-body").innerHTML = `<div id="list-error">Couldn't load panes: ${esc(e.message)}</div>`;
+    return;
+  }
+  const windows = new Map();
+  for (const p of panes) {
+    if (!windows.has(p.window)) windows.set(p.window, { name: p.window_name, panes: [] });
+    windows.get(p.window).panes.push(p);
+    lastTitle[p.id] = p.title || p.command;
+  }
+  if (!panes.length) {
+    $("list-body").innerHTML = `<div class="window-name">No tmux panes. Tap New window to start one.</div>`;
+    return;
+  }
+  $("list-body").innerHTML = [...windows].map(([index, w]) => `
+    <div class="window-name">${index}: ${esc(w.name)}</div>
+    ${w.panes.map((p) => `
+      <button class="pane" data-pane="${p.id}">
+        <div class="top">
+          <span class="title">${esc(p.title || p.command)}</span>
+          ${p.status ? `<span class="chip ${p.status}">${STATUS_LABEL[p.status]}</span>` : ""}
+        </div>
+        <div class="line">${esc(p.last_line || " ")}</div>
+      </button>`).join("")}`).join("");
+}
+
+$("list-body").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-pane]");
+  if (b) openPane(b.dataset.pane);
+});
+
+async function openPane(id) {
+  if (!(await act(`/api/panes/${id}/open`))) return;
+  current = id;
+  $("pane-title").textContent = lastTitle[id] || "";
+  // One terminal connection for the whole visit; tmux switches what it shows.
+  if (!$("term").src) $("term").src = "/term/";
+  $("list").classList.add("hidden");
+  $("pane").classList.remove("hidden");
+}
+
+async function showList() {
+  stopRecording(true);
+  unsent = null;
+  setMic("Mic");
+  $("text").value = "";
+  if (current) await act(`/api/panes/${current}/back`);
+  current = null;
+  $("pane").classList.add("hidden");
+  $("list").classList.remove("hidden");
+  loadPanes();
+}
+
+$("back").addEventListener("click", showList);
+$("new-window").addEventListener("click", async () => {
+  const r = await act("/api/windows");
+  if (r) openPane(r.pane);
+});
+
+document.querySelectorAll("[data-split]").forEach((b) => b.addEventListener("click", async () => {
+  const r = await act(`/api/panes/${current}/split`, { direction: b.dataset.split });
+  if (r) openPane(r.pane);
+}));
+
+$("close-pane").addEventListener("click", async () => {
+  if (!confirm(`Close "${$("pane-title").textContent}"? Anything running in it stops.`)) return;
+  if (await act(`/api/panes/${current}/close`)) { current = null; showList(); }
+});
+
+document.querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click", () => {
+  act(`/api/panes/${current}/key`, { key: b.dataset.key });
+}));
+
+$("reply").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("text").value;
+  if (!text.trim()) return;
+  if (await act(`/api/panes/${current}/send`, { text })) $("text").value = "";
+});
+
+// Tap Mic to record, tap Stop to end. The Mac transcribes it and the text lands in the box to check before Send.
+// A recording that fails to transcribe is kept, and Mic becomes Retry, so nothing said is lost.
+let recorder = null, unsent = null, timer = null;
+
+function setMic(label, { recording = false, busy = false } = {}) {
+  const mic = $("mic");
+  mic.textContent = label;
+  mic.classList.toggle("recording", recording);
+  mic.disabled = busy;
+}
+
+function stopRecording(discard) {
+  if (!recorder) return;
+  recorder.discard = discard;
+  recorder.stop();
+}
+
+async function sendAudio(audio) {
+  const pane = current;
+  setMic("Transcribing…", { busy: true });
+  try {
+    const r = await fetch("/api/transcribe", { method: "POST", headers: { "Content-Type": audio.type }, body: audio });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
+    if (pane !== current) return;  // left that pane while it was transcribing
+    unsent = null;
+    setMic("Mic");
+    if (!data.text) return toast("Didn't catch anything.");
+    const box = $("text");
+    box.value = box.value.trim() ? `${box.value.trimEnd()} ${data.text}` : data.text;
+    box.focus();
+  } catch (e) {
+    if (pane !== current) return;
+    unsent = audio;
+    setMic("Retry");
+    toast(e.message);
+  }
+}
+
+$("mic").addEventListener("click", async () => {
+  if (recorder) return stopRecording(false);
+  if (unsent) return sendAudio(unsent);
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    return toast(`Microphone blocked: ${e.message}`);
+  }
+  const chunks = [], started = Date.now();
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = (e) => chunks.push(e.data);
+  recorder.onstop = () => {
+    stream.getTracks().forEach((t) => t.stop());
+    clearInterval(timer);
+    const { discard, mimeType } = recorder;
+    recorder = null;
+    if (discard) return setMic("Mic");
+    const type = (mimeType || "audio/mp4").split(";")[0];
+    sendAudio(new Blob(chunks, { type }));
+  };
+  recorder.start();
+  const tick = () => {
+    const s = Math.floor((Date.now() - started) / 1000);
+    setMic(`Stop ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`, { recording: true });
+  };
+  tick();
+  timer = setInterval(tick, 1000);
+});
+
+// Swipe right on the header goes back to the list; the terminal itself keeps its own touches.
+let touchX = null;
+$("pane-header").addEventListener("touchstart", (e) => { touchX = e.touches[0].clientX; });
+$("pane-header").addEventListener("touchend", (e) => {
+  if (touchX !== null && e.changedTouches[0].clientX - touchX > 80) showList();
+  touchX = null;
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && $("term").src) $("term").src = "/term/";
+});
+
+setInterval(() => { if (!current && !document.hidden) loadPanes(); }, 3000);
+loadPanes();
+</script>
+</body>
+</html>
