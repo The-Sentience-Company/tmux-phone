@@ -2,11 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, interactive-widget=resizes-content">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="tmux">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="theme-color" content="#000000">
 <meta name="version" content="{{VERSION}}">
 <link rel="manifest" href="/manifest.json">
@@ -23,9 +23,6 @@
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 var(--font); }
   /* The views fill the body, which is sized to what is visible, so the key bar sits right on the keyboard. */
   body { position: relative; height: var(--vh, 100dvh); overflow: hidden; }
-  /* The status bar text is white; keep the strip behind it black. */
-  body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; height: env(safe-area-inset-top);
-    background: #000; pointer-events: none; }
   /* Header buttons read as [Label]. Pressed or armed shows in reverse video. */
   button { font: inherit; color: var(--fg); background: none; border: 0; border-radius: 0; padding: 0 6px;
     min-height: 40px; cursor: pointer; }
@@ -36,10 +33,7 @@
   button:disabled { color: var(--dim); }
   button.primary { color: var(--green); }
   button.danger { color: var(--red); }
-  .view { position: absolute; inset: 0; display: flex; flex-direction: column;
-    padding: env(safe-area-inset-top) env(safe-area-inset-right) max(env(safe-area-inset-bottom) - 20px, 4px) env(safe-area-inset-left); }
-  /* The home indicator is under the keyboard then, so no room is kept for it. */
-  .keyboard .view { padding-bottom: 0; }
+  .view { position: absolute; inset: 0; display: flex; flex-direction: column; }
   .hidden { display: none !important; }
   header { display: flex; align-items: center; padding: 0 2px; border-bottom: 1px solid var(--line); }
   header h1 { font-size: inherit; color: var(--green); margin: 0 6px; flex: 1; min-width: 0;
@@ -155,9 +149,7 @@ let panes = [], editMode = false, renaming = false;  // the list skips its refre
 
 function setViewportHeight() {
   // iOS keeps the layout height when the keyboard opens; size the page to what is actually visible.
-  const height = (window.visualViewport || window).height;
-  document.body.style.setProperty("--vh", `${height}px`);
-  document.body.classList.toggle("keyboard", height < document.documentElement.clientHeight - 100);
+  document.body.style.setProperty("--vh", `${(window.visualViewport || window).height}px`);
   window.scrollTo(0, 0);
 }
 (window.visualViewport || window).addEventListener("resize", setViewportHeight);
