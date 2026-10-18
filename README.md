@@ -8,7 +8,9 @@ It's for checking on and replying to Claude Code agents running in tmux panes. I
 
 - **Pane list:** every tmux pane, grouped by window. Each shows its title, its last line, and a status for Claude Code panes (Needs you / Working / Idle). Refreshes every 3 s.
 - **Open a pane:** tap it. The phone switches to it and zooms it if its window is split. The screen is the real terminal (ttyd running `tmux attach`).
-- **Buttons:** Split right, Split down, Close pane, New window.
+- **Buttons:** Close pane, New window. Splitting is left to the Mac, since a phone shows one pane at a time.
+- **Scroll:** swipe on the terminal to scroll back through the pane.
+- **Photos:** attach photos to a message. Claude Code receives them as `[Image #N]`.
 - **Key bar:** Esc, Enter, arrows, 1/2/3, Tab, ⇧Tab, Model (alt+p), Ctrl-C.
 - **Message box:** pastes the text into the pane, then presses Enter.
 - **Dictation:** tap Mic, talk, tap Stop. Whisper large-v3-turbo transcribes it on the Mac in about a second. The audio never leaves the Mac.
@@ -44,13 +46,12 @@ Logs: `~/.local/state/tmux-phone/server.log`.
 ## Smoke test
 
 `install.sh` ends by running `./smoke_test.py <url>` against the live install, through the tailnet URL. Run it on its own after any change. Each check confirms the result you would see, not a step on the way:
-- the pane list shows a new pane
-- the message box runs a command in it
-- the terminal stream shows that output
+- the pane list matches tmux
+- the terminal stream shows the screen you're on
 - dictation returns the spoken words
 - other websites get 403
 
-It opens a scratch tmux window for a few seconds, then closes it and switches back.
+It only reads. It never creates, switches, types into or resizes anything in your tmux, so it doesn't cover opening, sending, photos or scrolling.
 
 ## Security
 

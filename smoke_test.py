@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Checks the live install the way the phone uses it, through the tailnet URL.
 
-Each check asserts what you would see, not a step on the way: the pane in the list, the
-command's output in the pane, that output on the terminal stream, the right words from dictation.
+Each check asserts what you would see, not a step on the way: your panes in the list, the
+screen you're looking at on the terminal stream, the right words from dictation.
+
+It only reads. It never creates, switches, types into or resizes anything in your tmux, so
+opening, sending, photos and scrolling are not covered here.
 
 Usage: ./smoke_test.py https://<this-mac>.<tailnet>.ts.net
-Opens a scratch tmux window for a few seconds, then closes it and switches back.
 """
 import base64
 import json
 import os
+import re
 import socket
 import ssl
 import subprocess
@@ -22,7 +25,8 @@ from urllib.parse import urlparse
 
 ORIGIN = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else sys.exit(__doc__)
 HOST = urlparse(ORIGIN).hostname
-MARK = f"smoke-{os.getpid()}"
+# Escape sequences tmux draws with; stripped so the stream can be compared with the pane's text.
+ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>78DEHMc]")
 failures = []
 
 
@@ -53,7 +57,7 @@ def tmux(*args):
     return subprocess.run(["tmux", *args], capture_output=True, text=True, check=True).stdout.strip()
 
 
-def terminal_stream(origin, seconds):
+def terminal_stream(origin, seconds, columns=80, rows=24):
     """Opens the terminal websocket like the page does and returns (status line, text received)."""
     sock = ssl.create_default_context().wrap_socket(socket.create_connection((HOST, 443), timeout=10), server_hostname=HOST)
     key = base64.b64encode(os.urandom(16)).decode()
@@ -72,7 +76,7 @@ def terminal_stream(origin, seconds):
         sock.close()
         return status, ""
     # ttyd starts `tmux attach` once the page sends its size, as a masked binary frame.
-    payload = json.dumps({"AuthToken": "", "columns": 120, "rows": 40}).encode()
+    payload = json.dumps({"AuthToken": "", "columns": columns, "rows": rows}).encode()
     mask = os.urandom(4)
     sock.sendall(bytes([0x82, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
     text, deadline = b"", time.time() + seconds
@@ -102,97 +106,50 @@ def terminal_stream(origin, seconds):
 
 
 def main():
-    previous_window = tmux("display-message", "-p", "#{window_id}")
-    # A plain sh so the prompt is predictable. Detached, so the Mac's view only moves when the test opens it.
-    pane = tmux("new-window", "-d", "-n", "smoke-test", "-P", "-F", "#{pane_id}", "sh").lstrip("%")
-    try:
-        def page():
-            status, body = request("/")
-            assert status == 200 and b"<title>tmux</title>" in body, f"GET / returned {status}"
-        check("page loads", page)
+    def page():
+        status, body = request("/")
+        assert status == 200 and b"<title>tmux</title>" in body, f"GET / returned {status}"
+    check("page loads", page)
 
-        def pane_listed():
-            status, body = request("/api/panes")
-            assert status == 200, f"GET /api/panes returned {status}: {body[:200]!r}"
-            ids = [p["id"] for p in json.loads(body)["panes"]]
-            assert pane in ids, f"test pane %{pane} not in list {ids}"
-        check("pane list shows the new pane", pane_listed)
+    def pane_list():
+        status, body = request("/api/panes")
+        assert status == 200, f"GET /api/panes returned {status}: {body[:200]!r}"
+        listed = sorted(p["id"] for p in json.loads(body)["panes"])
+        real = sorted(tmux("list-panes", "-a", "-F", "#{pane_id}").replace("%", "").split())
+        assert listed == real, f"list shows {listed}, tmux has {real}"
+    check("pane list matches tmux", pane_list)
 
-        def open_pane():
-            status, body = request(f"/api/panes/{pane}/open", {})
-            assert status == 200, f"{status}: {body[:200]!r}"
-            assert tmux("display-message", "-p", "#{pane_id}") == f"%{pane}", "tmux did not switch to the pane"
-        check("opening a pane switches tmux to it", open_pane)
+    def terminal():
+        # Attach at the window's own size so the Mac's layout doesn't change.
+        pane, columns, rows = tmux("display-message", "-p", "#{pane_id} #{window_width} #{window_height}").split()
+        status, text = terminal_stream(ORIGIN, seconds=3, columns=int(columns), rows=int(rows))
+        assert " 101 " in status, f"websocket handshake: {status}"
+        assert text, "connected, but no terminal output arrived (the 'Reconnecting…' bug)"
+        lines = [l for l in tmux("capture-pane", "-p", "-t", pane).splitlines() if len(l.split()) >= 2]
+        assert lines, "the active pane is blank, nothing to compare"
+        # tmux may draw spaces as cursor moves, so compare with all whitespace removed.
+        line = max(lines, key=len)
+        assert "".join(line.split()) in "".join(ESCAPES.sub("", text).split()), f"stream does not show the screen's line {line.strip()!r}"
+    check("terminal shows the screen you're on", terminal)
 
-        def send():
-            # The quotes split the typed text, so MARK alone on a line only shows up if the shell ran it.
-            status, body = request(f"/api/panes/{pane}/send", {"text": f"echo smoke-\"\"{os.getpid()}"})
-            assert status == 200, f"{status}: {body[:200]!r}"
-            for _ in range(20):
-                if MARK in tmux("capture-pane", "-p", "-t", f"%{pane}").splitlines():
-                    return
-                time.sleep(0.1)
-            raise AssertionError(f"{MARK} never printed in the pane")
-        check("message box runs a command in the pane", send)
+    def dictation():
+        with tempfile.TemporaryDirectory() as d:
+            clip = os.path.join(d, "clip.m4a")
+            subprocess.run(["say", "-o", clip, "--data-format=aac", "The quick brown fox jumps over the lazy dog."], check=True)
+            with open(clip, "rb") as f:
+                status, body = request("/api/transcribe", f.read(), content_type="audio/mp4")
+        assert status == 200, f"{status}: {body[:200]!r}"
+        text = json.loads(body)["text"].lower()
+        assert "quick brown fox" in text, f"got {text!r}"
+    check("dictation returns the spoken words", dictation)
 
-        def image():
-            # 1x1 PNG. `wc -c` plus the path the server appends prints the saved file's size and path.
-            png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
-            status, body = request(f"/api/panes/{pane}/send", {"text": "wc -c", "images": [base64.b64encode(png).decode()]})
-            assert status == 200, f"{status}: {body[:200]!r}"
-            for _ in range(20):
-                saved = [l.split()[-1] for l in tmux("capture-pane", "-p", "-t", f"%{pane}").splitlines()
-                         if "/uploads/" in l and l.split()[0].isdigit()]
-                if saved:
-                    with open(saved[-1], "rb") as f:
-                        assert f.read() == png, f"{saved[-1]} does not hold the image that was sent"
-                    os.unlink(saved[-1])
-                    return
-                time.sleep(0.1)
-            raise AssertionError("the pane never received a saved image path")
-        check("photo arrives in the pane as a saved file", image)
-
-
-        def terminal():
-            status, text = terminal_stream(ORIGIN, seconds=3)
-            assert " 101 " in status, f"websocket handshake: {status}"
-            assert text, "connected, but no terminal output arrived (the 'Reconnecting…' bug)"
-            assert MARK in text, f"terminal output arrived ({len(text)} chars) but does not show the pane's {MARK}"
-        check("terminal shows the pane's screen", terminal)
-
-        def scroll():
-            # Fill the pane's history first, or there is nothing to scroll back to.
-            tmux("send-keys", "-t", f"%{pane}", "seq 200", "Enter")
-            time.sleep(0.3)
-            status, body = request(f"/api/panes/{pane}/scroll", {"lines": 3})
-            assert status == 200, f"{status}: {body[:200]!r}"
-            mode, position = tmux("display-message", "-p", "-t", f"%{pane}", "#{pane_in_mode} #{scroll_position}").split()
-            assert (mode, position) == ("1", "3"), f"pane is not scrolled back 3 lines (in_mode={mode}, position={position})"
-            status, body = request(f"/api/panes/{pane}/key", {"key": "enter"})
-            assert status == 200, f"{status}: {body[:200]!r}"
-            assert tmux("display-message", "-p", "-t", f"%{pane}", "#{pane_in_mode}") == "0", "a key press left the pane scrolled back"
-        check("swiping scrolls the pane, and typing returns to the bottom", scroll)
-
-        def dictation():
-            with tempfile.TemporaryDirectory() as d:
-                clip = os.path.join(d, "clip.m4a")
-                subprocess.run(["say", "-o", clip, "--data-format=aac", "The quick brown fox jumps over the lazy dog."], check=True)
-                with open(clip, "rb") as f:
-                    status, body = request("/api/transcribe", f.read(), content_type="audio/mp4")
-            assert status == 200, f"{status}: {body[:200]!r}"
-            text = json.loads(body)["text"].lower()
-            assert "quick brown fox" in text, f"got {text!r}"
-        check("dictation returns the spoken words", dictation)
-
-        def other_sites_blocked():
-            status, _ = request(f"/api/panes/{pane}/key", {"key": "enter"}, origin="https://evil.example")
-            assert status == 403, f"POST from another origin returned {status}"
-            status, _ = terminal_stream("https://evil.example", seconds=0)
-            assert " 403 " in status, f"terminal from another origin: {status}"
-        check("other websites can't type or open the terminal", other_sites_blocked)
-    finally:
-        subprocess.run(["tmux", "kill-pane", "-t", f"%{pane}"], capture_output=True)
-        subprocess.run(["tmux", "select-window", "-t", previous_window], capture_output=True)
+    def other_sites_blocked():
+        # Pane 0 needn't exist: the origin is refused before anything reaches tmux.
+        status, _ = request("/api/panes/0/key", {"key": "enter"}, origin="https://evil.example")
+        assert status == 403, f"POST from another origin returned {status}"
+        status, _ = terminal_stream("https://evil.example", seconds=0)
+        assert " 403 " in status, f"terminal from another origin: {status}"
+    check("other websites can't type or open the terminal", other_sites_blocked)
 
     if failures:
         sys.exit(f"\n{len(failures)} failed: {', '.join(failures)}")

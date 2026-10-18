@@ -75,12 +75,8 @@
   <header id="pane-header">
     <button id="back" aria-label="Back to panes">‹ Panes</button>
     <h1 id="pane-title"></h1>
+    <button id="close-pane" class="danger">Close</button>
   </header>
-  <div class="bar">
-    <button data-split="right">Split right</button>
-    <button data-split="down">Split down</button>
-    <button id="close-pane" class="danger">Close pane</button>
-  </div>
   <div id="term-wrap"><iframe id="term" title="Terminal"></iframe></div>
   <div class="bar">
     <button data-key="escape">Esc</button>
@@ -215,11 +211,6 @@ $("new-window").addEventListener("click", async () => {
   const r = await act("/api/windows");
   if (r) openPane(r.pane);
 });
-
-document.querySelectorAll("[data-split]").forEach((b) => b.addEventListener("click", async () => {
-  const r = await act(`/api/panes/${current}/split`, { direction: b.dataset.split });
-  if (r) openPane(r.pane);
-}));
 
 $("close-pane").addEventListener("click", async () => {
   if (!confirm(`Close "${$("pane-title").textContent}"? Anything running in it stops.`)) return;

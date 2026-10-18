@@ -31,7 +31,7 @@ IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg", b"GIF87a": "
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 WHISPER_HOST, WHISPER_PORT = "127.0.0.1", 8767
 
-PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|send|key|scroll|split|close)$")
+PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|send|key|scroll|close)$")
 # Phone button name -> tmux send-keys name. Digits answer Claude's numbered menus.
 KEYS = {"enter": "Enter", "escape": "Escape", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
         "tab": "Tab", "shift+tab": "BTab", "ctrl+c": "C-c", "alt+p": "M-p", "1": "1", "2": "2", "3": "3"}
@@ -291,11 +291,6 @@ class Handler(BaseHTTPRequestHandler):
                     tmux("send-keys", "-t", pane, "-X", "-N", str(lines), "scroll-up")
                 elif pane_info(pane, "pane_in_mode") == ["1"]:
                     tmux("send-keys", "-t", pane, "-X", "-N", str(-lines), "scroll-down")
-            elif action == "split":
-                flag = {"right": "-h", "down": "-v"}.get(body.get("direction"))
-                if not flag:
-                    return self.reply(400, {"error": "bad direction"})
-                return self.reply(200, {"pane": tmux("split-window", flag, "-t", pane, "-P", "-F", "#{pane_id}").strip().lstrip("%")})
             elif action == "close":
                 tmux("kill-pane", "-t", pane)
             self.reply(200, {"ok": True})
