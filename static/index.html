@@ -50,23 +50,31 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   #list-body { flex: 1; overflow-y: auto; }
-  .window-name { color: var(--green); padding: 12px 8px 2px; }
-  .pane { display: block; width: 100%; text-align: left; padding: 4px 8px 4px 24px; }
+  /* Each window's panes hang under it as a tree: ├─ for each pane but the last, └─ for the last, and a dim line
+     down the left of a pane's lines and its actions, so it is plain which window a pane belongs to. */
+  .window-name { color: var(--green); padding: 10px 8px 0; }
+  .pane { position: relative; display: block; width: 100%; min-height: 0; text-align: left; padding: 1px 8px 1px calc(8px + 3ch); }
+  .pane::before { content: "├─"; position: absolute; left: 8px; top: 1px; color: var(--dim); }
+  .pane.last::before { content: "└─"; }
+  .pane:not(.last)::after { content: ""; position: absolute; left: calc(8px + 0.5ch - 0.5px); top: 0; bottom: 0; width: 1px;
+    background: var(--dim); }
   .pane .top { display: flex; gap: 8px; }
   .pane .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pane .line { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pane:active .line { color: inherit; }
-  .chip { white-space: nowrap; }
-  .chip::before { content: "["; } .chip::after { content: "]"; }
-  .chip.needs_you { color: var(--red); font-weight: bold; } .chip.working { color: var(--green); } .chip.idle { color: var(--dim); }
-  .pane:active .chip { color: inherit; }
+  /* Claude Code's state, plain text at the right of the title: not a button, so no brackets. */
+  .status { white-space: nowrap; }
+  .status.needs_you { color: var(--red); font-weight: bold; } .status.working { color: var(--green); } .status.idle { color: var(--dim); }
+  .pane:active .status { color: inherit; }
   #list-error { color: var(--red); padding: 8px; }
-  /* Edit mode: [rename] [new pane] or [rename] [close] on a line under each name, and a [new window] row at the bottom. */
+  /* Edit mode: a window's [rename] [new pane] at the right of its name, on the next line only if the name is long;
+     [rename] [close] on a line under each pane, inside its tree line; a [new window] row at the bottom. */
   .window-name, .pane .top { display: flex; align-items: center; gap: 8px; }
   .window-name { gap: 0; flex-wrap: wrap; } .window-name .name { margin-left: 1ch; }
-  .window-name .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .window-name .name { flex: 1 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .acts { display: flex; flex-basis: 100%; gap: 12px; }
-  .acts button { min-height: 36px; padding: 0 4px; }
+  .window-name .acts { flex-basis: auto; margin-left: auto; }
+  .acts button { min-height: 32px; padding: 0 4px; }
   .add-window { margin: 12px 4px 0; }
   /* The session row at the top of the list: session: [0] [work], the phone's session in reverse video. */
   #sessions { display: flex; flex-wrap: wrap; align-items: center; padding: 4px 4px 4px 8px; border-bottom: 1px solid var(--line); }
@@ -252,14 +260,14 @@ function renderPanes() {
     $("list-body").innerHTML = `${top}<div class="window-name">No tmux panes. Tap [edit], then [new window].</div>${addWindow}`;
     return;
   }
-  const chip = (p) => p.status ? `<span class="chip ${p.status}">${STATUS_LABEL[p.status]}</span>` : "";
+  const chip = (p) => p.status ? `<span class="status ${p.status}">${STATUS_LABEL[p.status]}</span>` : "";
   $("list-body").innerHTML = top + [...windows].map(([index, w]) => `
     <div class="window-name">
       <span>${index}:</span><span class="name rn-target">${esc(w.name)}</span>
       ${editMode ? `<span class="acts"><button class="br" data-act="rename-window" data-id="${w.id}">rename</button><button class="br primary" data-act="add-pane" data-id="${w.id}">new pane</button></span>` : ""}
     </div>
-    ${w.panes.map((p) => editMode ? `
-      <div class="pane">
+    ${w.panes.map((p, i) => editMode ? `
+      <div class="pane${i === w.panes.length - 1 ? " last" : ""}">
         <div class="top">
           <span class="title rn-target">${esc(p.title || p.command)}</span>
           ${chip(p)}
@@ -267,7 +275,7 @@ function renderPanes() {
         <div class="line">${esc(p.last_line || " ")}</div>
         <div class="acts"><button class="br" data-act="rename-pane" data-id="${p.id}">rename</button><button class="br danger" data-act="close-pane" data-id="${p.id}">close</button></div>
       </div>` : `
-      <button class="pane" data-pane="${p.id}">
+      <button class="pane${i === w.panes.length - 1 ? " last" : ""}" data-pane="${p.id}">
         <div class="top">
           <span class="title">${esc(p.title || p.command)}</span>
           ${chip(p)}

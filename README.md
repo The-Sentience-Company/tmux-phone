@@ -6,7 +6,7 @@ It's for checking on and replying to Claude Code agents running in tmux panes. I
 
 ## What it does
 
-- **Pane list:** every tmux pane, grouped by window. Each shows its title, its last line, and a status for Claude Code panes (`[needs you]` / `[working]` / `[idle]`). Refreshes every 3 s.
+- **Pane list:** every tmux pane, drawn as a tree under its window (`├─`, `└─`). Each shows its title, its last line, and a status for Claude Code panes at the right of its title (`needs you` / `working` / `idle`, plain text). Refreshes every 3 s.
 - **Open a pane:** tap it. The phone switches to it and zooms it if its window is split. The screen is the real terminal: a small xterm.js client on the page, talking to ttyd, which attaches to the phone's own tmux session (see below). Type straight into it. It reconnects by itself if the connection drops.
 - **Own session:** the phone attaches to a hidden tmux session named `_phone`, grouped with one real session (see Sessions): same windows and panes, but its own current window. Switching windows on the phone does not move the Mac, and a window made on either shows on both. `_phone` is never in the session list. Zoom belongs to the window, so a pane the phone zooms is zoomed on the Mac too, until you go back to the list.
 - **Clock:** the strip at the very bottom of the screen is the iPhone home-indicator area. It shows the time as `HH:MM` at its top, under a dim line, below the key bar and below the list. The phone's tmux session has tmux's status line turned off.
@@ -86,7 +86,7 @@ Anyone who gets in has a full shell on the Mac, so:
 
 - One tmux server on the default socket. The list shows one session's panes at a time; switch with the session row.
 - tmux has `set -g mouse on`. A swipe is sent as mouse wheel input, which tmux acts on only with the mouse on.
-- A pane counts as Claude Code if its foreground process is named `claude`. The status chips read Claude Code's screen: the `❯` input box and the spinner line. A Claude Code UI change can break them.
+- A pane counts as Claude Code if its foreground process is named `claude`. The status labels read Claude Code's screen: the `❯` input box and the spinner line. A Claude Code UI change can break them.
 
 ## Uninstall
 
