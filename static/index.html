@@ -52,10 +52,11 @@
   #list-body { flex: 1; overflow-y: auto; }
   /* Each window's panes hang under it as a tree: ├─ for each pane but the last, └─ for the last, and a dim line
      down the left of a pane's lines and its actions, so it is plain which window a pane belongs to. */
-  .window-name { color: var(--green); padding: 10px 8px 0; }
+  .window-name { color: var(--green); padding: 14px 8px 0; }
   .pane { position: relative; display: block; width: 100%; min-height: 0; text-align: left; padding: 1px 8px 1px calc(8px + 3ch); }
   .pane::before { content: "├─"; position: absolute; left: 8px; top: 1px; color: var(--dim); }
   .pane.last::before { content: "└─"; }
+  .pane:not(.last) { padding-bottom: 11px; }  /* space before the next pane, inside the row so the tree line runs through it */
   .pane:not(.last)::after { content: ""; position: absolute; left: calc(8px + 0.5ch - 0.5px); top: 0; bottom: 0; width: 1px;
     background: var(--dim); }
   .pane .top { display: flex; gap: 8px; }
@@ -67,25 +68,17 @@
   .status.needs_you { color: var(--red); font-weight: bold; } .status.working { color: var(--green); } .status.idle { color: var(--dim); }
   .pane:active .status { color: inherit; }
   #list-error { color: var(--red); padding: 8px; }
-  /* Edit mode: a window's [rename] [new pane] at the right of its name, on the next line only if the name is long;
-     [rename] [close] on a line under each pane, inside its tree line; a [new window] row at the bottom. */
-  .window-name, .pane .top { display: flex; align-items: center; gap: 8px; }
-  .window-name { gap: 0; flex-wrap: wrap; } .window-name .name { margin-left: 1ch; }
-  .window-name .wname { display: flex; flex: 1 0 auto; max-width: 100%; min-width: 0; }
+  .window-name { display: flex; align-items: center; } .window-name .name { margin-left: 1ch; }
   .window-name .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .acts { display: flex; flex-basis: 100%; gap: 12px; }
-  .window-name .acts { flex-basis: auto; margin-left: auto; }
-  .acts button { min-height: 32px; padding: 0 4px; }
-  .add-window { margin: 12px 4px 0; }
   /* The session row at the top of the list: session: [0] [work], the phone's session in reverse video. */
   #sessions { display: flex; flex-wrap: wrap; align-items: center; padding: 4px 4px 4px 8px; border-bottom: 1px solid var(--line); }
   #sessions .label { color: var(--dim); margin-right: 2px; }
   #sessions button { min-height: 36px; padding: 0 4px; }
-  #sessions .current { background: var(--fg); color: var(--bg); }
-  #sessions .current::before, #sessions .current::after { color: inherit; }
-  #sessions .session { flex-basis: 100%; padding: 0; }
-  #sessions .session .name { flex: 0 1 auto; margin-left: 0; padding: 0 1ch; }
-  #sessions .add-session { margin: 6px 0 4px; }
+  /* Edit mode: a tapped row is selected, in reverse video. The phone's session then shows in green instead. */
+  #sessions .current, .sel { background: var(--fg); color: var(--bg); }
+  #sessions .current::before, #sessions .current::after, .sel::before, .sel::after, .sel * { color: inherit; }
+  .editing #sessions .current:not(.sel) { background: none; color: var(--green); }
+  .editing #sessions .current:not(.sel)::before, .editing #sessions .current:not(.sel)::after { color: var(--dim); }
   .rename { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--green);
     border-radius: 0; padding: 0 4px; outline: none; }
 
@@ -130,6 +123,7 @@
     <button id="edit">edit</button>
   </header>
   <div id="list-body"></div>
+  <div id="edit-bar" class="bar hidden"></div>
 </section>
 
 <section id="pane" class="view hidden">
@@ -179,6 +173,7 @@ const STATUS_LABEL = { needs_you: "needs you", working: "working", idle: "idle" 
 let current = null;  // id of the pane open on the phone
 let lastTitle = {};
 let panes = [], sessions = [], editMode = false, renaming = false;  // the list skips its refresh while a name is being typed
+let selected = null;  // in edit mode, the tapped row: "session:3", "window:3" or "pane:3", by tmux id
 
 // iOS keeps the layout height when the keyboard opens, and scrolls the page to show the focused input.
 // Undo the scroll and pin the page to what is actually visible above the keyboard and its accessory bar.
@@ -248,56 +243,60 @@ function renderClock() {
 renderClock();
 setInterval(renderClock, 15000);
 
-// In edit mode a pane row is not a button, so a tap on it opens nothing.
+// One tree for both modes. In edit mode a tap selects a row (data-sel) and opens nothing; the bar at the bottom
+// holds the actions for the selected row. A pane row is a div then, so a rename box can go inside it.
 function renderPanes() {
   const windows = new Map();
   for (const p of panes) {
     if (!windows.has(p.window)) windows.set(p.window, { id: p.window_id, name: p.window_name, panes: [] });
     windows.get(p.window).panes.push(p);
   }
-  const addWindow = editMode ? `<button class="br primary add-window" data-act="new-window">new window</button>` : "";
-  const top = renderSessions();
+  if (selected && !selectedItem()) selected = null;  // closed on the Mac
+  $("list").classList.toggle("editing", editMode);
+  $("edit-bar").classList.toggle("hidden", !editMode);
+  if (editMode) $("edit-bar").innerHTML = editBar();
+  const sel = (key) => (selected === key ? " sel" : "");
+  const top = renderSessions(sel);
   if (!panes.length) {
-    $("list-body").innerHTML = `${top}<div class="window-name">No tmux panes. Tap [edit], then [new window].</div>${addWindow}`;
+    $("list-body").innerHTML = `${top}<div class="window-name">No tmux panes. Tap [edit], then [new window].</div>`;
     return;
   }
   const chip = (p) => p.status ? `<span class="status ${p.status}">${STATUS_LABEL[p.status]}</span>` : "";
+  const tag = editMode ? "div" : "button";
   $("list-body").innerHTML = top + [...windows].map(([index, w]) => `
-    <div class="window-name">
-      <span class="wname"><span>${index}:</span><span class="name rn-target">${esc(w.name)}</span></span>
-      ${editMode ? `<span class="acts"><button class="br" data-act="rename-window" data-id="${w.id}">rename</button><button class="br primary" data-act="add-pane" data-id="${w.id}">new pane</button></span>` : ""}
-    </div>
-    ${w.panes.map((p, i) => editMode ? `
-      <div class="pane${i === w.panes.length - 1 ? " last" : ""}">
+    <div class="window-name${sel(`window:${w.id}`)}" data-sel="window:${w.id}"><span>${index}:</span><span class="name">${esc(w.name)}</span></div>
+    ${w.panes.map((p, i) => `
+      <${tag} class="pane${i === w.panes.length - 1 ? " last" : ""}${sel(`pane:${p.id}`)}" data-sel="pane:${p.id}" data-pane="${p.id}">
         <div class="top">
-          <span class="title rn-target">${esc(p.title || p.command)}</span>
+          <span class="title name">${esc(p.title || p.command)}</span>
           ${chip(p)}
         </div>
         <div class="line">${esc(p.last_line || " ")}</div>
-        <div class="acts"><button class="br" data-act="rename-pane" data-id="${p.id}">rename</button><button class="br danger" data-act="close-pane" data-id="${p.id}">close</button></div>
-      </div>` : `
-      <button class="pane${i === w.panes.length - 1 ? " last" : ""}" data-pane="${p.id}">
-        <div class="top">
-          <span class="title">${esc(p.title || p.command)}</span>
-          ${chip(p)}
-        </div>
-        <div class="line">${esc(p.last_line || " ")}</div>
-      </button>`).join("")}`).join("") + addWindow;
+      </${tag}>`).join("")}`).join("");
 }
 
 // The session row: tap a session to show its windows on the phone. Hidden with one session, outside edit mode.
-// In edit mode each session gets [rename] and [close], and the row ends with [new session].
-function renderSessions() {
-  if (!editMode) {
-    if (sessions.length < 2) return "";
-    return `<div id="sessions"><span class="label">session:</span>${sessions.map((s) =>
-      `<button class="br${s.current ? " current" : ""}" data-act="switch-session" data-id="${s.id}">${esc(s.name)}</button>`).join("")}</div>`;
-  }
-  return `<div id="sessions"><span class="label">session:</span>${sessions.map((s) => `
-    <div class="window-name session">
-      <span class="name rn-target${s.current ? " current" : ""}">${esc(s.name)}</span>
-      <span class="acts"><button class="br" data-act="rename-session" data-id="${s.id}">rename</button><button class="br danger" data-act="close-session" data-id="${s.id}">close</button></span>
-    </div>`).join("")}<button class="br primary add-session" data-act="new-session">new session</button></div>`;
+function renderSessions(sel) {
+  if (!editMode && sessions.length < 2) return "";
+  return `<div id="sessions"><span class="label">session:</span>${sessions.map((s) =>
+    `<button class="br name${s.current ? " current" : ""}${sel(`session:${s.id}`)}" data-sel="session:${s.id}">${esc(s.name)}</button>`).join("")}</div>`;
+}
+
+// The selected session, window (as its first pane) or pane, or undefined.
+function selectedItem() {
+  const [kind, id] = (selected || "").split(":");
+  if (kind === "session") return sessions.find((s) => s.id === id);
+  if (kind === "window") return panes.find((p) => p.window_id === id);
+  if (kind === "pane") return panes.find((p) => p.id === id);
+}
+
+function editBar() {
+  const kind = (selected || "").split(":")[0], item = selectedItem();
+  const b = (act, label, cls = "") => `<button class="${cls}" data-act="${act}">${label}</button>`;
+  if (kind === "session") return b("rename", "rename") + (item.current ? "" : b("switch-session", "switch to")) + b("close-session", "close session", "danger");
+  if (kind === "window") return b("rename", "rename") + b("add-pane", "new pane", "primary") + b("close-window", "close window", "danger");
+  if (kind === "pane") return b("rename", "rename") + b("close-pane", "close pane", "danger");
+  return b("new-window", "new window", "primary") + b("new-session", "new session", "primary");
 }
 
 // A session change remakes the phone's tmux session, which ends the terminal's attach; connect again to the new one.
@@ -307,7 +306,8 @@ async function sessionAct(path, body) {
   loadPanes();
 }
 
-// [rename] swaps the name for a text box. Enter saves; Escape or tapping away keeps the old name.
+// [rename] swaps the name for a text box. Enter or tapping away saves; Escape keeps the old name.
+// An empty or unchanged name sends nothing.
 function rename(target, name, path) {
   renaming = true;
   const input = Object.assign(document.createElement("input"), {
@@ -329,32 +329,47 @@ function rename(target, name, path) {
     if (e.key === "Enter") { e.preventDefault(); finish(true); }
     else if (e.key === "Escape") finish(false);
   });
-  input.addEventListener("blur", () => finish(false));
+  input.addEventListener("blur", () => finish(true));
 }
 
-$("list-body").addEventListener("click", async (e) => {
-  const a = e.target.closest("[data-act]");
-  if (!a) {
-    const b = e.target.closest("[data-pane]");
-    if (b) openPane(b.dataset.pane);
-    return;
+$("list-body").addEventListener("click", (e) => {
+  const row = e.target.closest("[data-sel]");
+  if (!row || renaming) return;
+  if (editMode) {
+    selected = selected === row.dataset.sel ? null : row.dataset.sel;
+    return renderPanes();
   }
-  const id = a.dataset.id, target = a.closest(".window-name, .pane")?.querySelector(".rn-target");
-  if (a.dataset.act === "switch-session") {
-    if (!sessions.find((s) => s.id === id).current) sessionAct(`/api/sessions/${id}/switch`);
-  } else if (a.dataset.act === "rename-session") {
-    rename(target, sessions.find((s) => s.id === id).name, `/api/sessions/${id}/rename`);
+  const [kind, id] = row.dataset.sel.split(":");
+  if (kind === "pane") openPane(id);
+  else if (kind === "session" && !sessions.find((s) => s.id === id).current) sessionAct(`/api/sessions/${id}/switch`);
+});
+
+$("edit-bar").addEventListener("click", async (e) => {
+  const a = e.target.closest("[data-act]");
+  if (!a) return;
+  const [kind, id] = (selected || "").split(":"), item = selectedItem();
+  if (a.dataset.act === "rename") {
+    const target = document.querySelector(`#list-body [data-sel="${selected}"]`);
+    const name = kind === "session" ? item.name : kind === "window" ? item.window_name : item.title;
+    rename(kind === "session" ? target : target.querySelector(".name"), name, `/api/${kind}s/${id}/rename`);
+  } else if (a.dataset.act === "switch-session") {
+    sessionAct(`/api/sessions/${id}/switch`);
   } else if (a.dataset.act === "close-session") {
-    const s = sessions.find((s) => s.id === id), w = s.windows === 1 ? "1 window" : `${s.windows} windows`;
-    if (confirm(`Close session "${s.name}"? Its ${w} close, and anything running in them stops.`)) sessionAct(`/api/sessions/${id}/close`);
+    const w = item.windows === 1 ? "1 window" : `${item.windows} windows`;
+    if (!confirm(`Close session "${item.name}"? Its ${w} close, and anything running in them stops.`)) return;
+    selected = null;
+    sessionAct(`/api/sessions/${id}/close`);
   } else if (a.dataset.act === "new-session") {
     sessionAct("/api/sessions");
-  } else if (a.dataset.act === "rename-window") {
-    rename(target, panes.find((p) => p.window_id === id).window_name, `/api/windows/${id}/rename`);
-  } else if (a.dataset.act === "rename-pane") {
-    rename(target, panes.find((p) => p.id === id).title, `/api/panes/${id}/rename`);
+  } else if (a.dataset.act === "close-window") {
+    const n = panes.filter((p) => p.window_id === id).length, ps = n === 1 ? "1 pane" : `${n} panes`;
+    if (!confirm(`Close window "${item.window_name}"? Its ${ps} close, and anything running in them stops.`)) return;
+    selected = null;
+    if (await act(`/api/windows/${id}/close`)) loadPanes();
   } else if (a.dataset.act === "close-pane") {
-    if (confirm(`Close "${lastTitle[id]}"? Anything running in it stops.`) && await act(`/api/panes/${id}/close`)) loadPanes();
+    if (!confirm(`Close "${lastTitle[id]}"? Anything running in it stops.`)) return;
+    selected = null;
+    if (await act(`/api/panes/${id}/close`)) loadPanes();
   } else {
     const r = await act(a.dataset.act === "add-pane" ? `/api/windows/${id}/panes` : "/api/windows");
     if (r) openPane(r.pane);
@@ -363,6 +378,7 @@ $("list-body").addEventListener("click", async (e) => {
 
 $("edit").addEventListener("click", () => {
   editMode = !editMode;
+  selected = null;
   $("edit").textContent = editMode ? "done" : "edit";
   renderPanes();
 });

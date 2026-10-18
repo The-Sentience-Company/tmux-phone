@@ -42,7 +42,7 @@ WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 WHISPER_HOST, WHISPER_PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_WHISPER_PORT", "8767"))
 
 PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|paste|key|close|rename)$")
-WINDOW_ROUTE = re.compile(r"^/api/windows/(\d+)/(rename|panes)$")  # by window id: 3 is tmux's @3
+WINDOW_ROUTE = re.compile(r"^/api/windows/(\d+)/(rename|panes|close)$")  # by window id: 3 is tmux's @3
 SESSION_ROUTE = re.compile(r"^/api/sessions/(\d+)/(switch|rename|close)$")  # by session id: 3 is tmux's $3
 MAX_NAME = 100
 # Phone button name -> tmux send-keys name. Digits answer Claude's numbered menus.
@@ -406,6 +406,9 @@ class Handler(BaseHTTPRequestHandler):
                 window, action = f"@{m[1]}", m[2]
                 if action == "panes":
                     return self.reply(200, {"pane": add_pane(window)})
+                if action == "close":
+                    tmux("kill-window", "-t", window)
+                    return self.reply(200, {"ok": True})
                 if not valid_name(body.get("name")):
                     return self.reply(400, {"error": "bad name"})
                 # Naming a window also turns off tmux's automatic-rename for it, so the name sticks.
