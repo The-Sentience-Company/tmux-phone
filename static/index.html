@@ -51,12 +51,12 @@
   .chip.needs_you { color: var(--red); font-weight: bold; } .chip.working { color: var(--green); } .chip.idle { color: var(--dim); }
   .pane:active .chip { color: inherit; }
   #list-error { color: var(--red); padding: 8px; }
-  /* Edit mode: [rename] [new pane] [close] at the end of each row, and a [new window] row at the bottom. */
+  /* Edit mode: [rename] [new pane] or [rename] [close] on a line under each name, and a [new window] row at the bottom. */
   .window-name, .pane .top { display: flex; align-items: center; gap: 8px; }
-  .window-name { gap: 0; } .window-name .name { margin-left: 1ch; }
+  .window-name { gap: 0; flex-wrap: wrap; } .window-name .name { margin-left: 1ch; }
   .window-name .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .acts { display: flex; flex-shrink: 0; }
-  .acts button { min-height: 32px; padding: 0 4px; }
+  .acts { display: flex; flex-basis: 100%; gap: 12px; }
+  .acts button { min-height: 36px; padding: 0 4px; }
   .add-window { margin: 12px 4px 0; }
   .rename { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--green);
     border-radius: 0; padding: 0 4px; outline: none; }
@@ -226,9 +226,9 @@ function renderPanes() {
         <div class="top">
           <span class="title rn-target">${esc(p.title || p.command)}</span>
           ${chip(p)}
-          <span class="acts"><button class="br" data-act="rename-pane" data-id="${p.id}">rename</button><button class="br danger" data-act="close-pane" data-id="${p.id}">close</button></span>
         </div>
         <div class="line">${esc(p.last_line || " ")}</div>
+        <div class="acts"><button class="br" data-act="rename-pane" data-id="${p.id}">rename</button><button class="br danger" data-act="close-pane" data-id="${p.id}">close</button></div>
       </div>` : `
       <button class="pane" data-pane="${p.id}">
         <div class="top">
