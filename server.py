@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Phone UI for the tmux session on this Mac, served on the tailnet via `tailscale serve`."""
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import traceback
 import unicodedata
 import uuid
 from http.client import HTTPConnection
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -41,6 +43,7 @@ WHISPER_HOST, WHISPER_PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_WHISPER
 
 PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|paste|key|close|rename)$")
 WINDOW_ROUTE = re.compile(r"^/api/windows/(\d+)/(rename|panes)$")  # by window id: 3 is tmux's @3
+SESSION_ROUTE = re.compile(r"^/api/sessions/(\d+)/(switch|rename|close)$")  # by session id: 3 is tmux's $3
 MAX_NAME = 100
 # Phone button name -> tmux send-keys name. Digits answer Claude's numbered menus.
 KEYS = {"enter": "Enter", "escape": "Escape", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
@@ -70,21 +73,86 @@ def tmux(*args, stdin=None):
     return r.stdout
 
 
-# The phone's own tmux session. It shares the Mac session's windows (a tmux session group) but has its own
-# current window and no status line, so switching windows on the phone does not move the Mac.
-PHONE = "phone"
+# The phone's viewer: a hidden tmux session grouped with one real session, the target. It shares the target's
+# windows but has its own current window and no status line, so switching windows on the phone does not move the Mac.
+# It is never listed as a session. The target is the real session in the viewer's group, so tmux itself remembers it.
+VIEWER = "_phone"
+OLD_VIEWER = "phone"  # the viewer's name before _phone
+SESSION_FIELDS = ["session_id", "session_name", "session_grouped", "session_group", "session_windows",
+                  "session_attached", "session_last_attached", "session_activity"]
 
 
-def ensure_phone_session():
-    """Create the phone's session if it is gone: grouped with the most recently used other session, status line off."""
-    if subprocess.run(["tmux", "has-session", "-t", f"={PHONE}"], capture_output=True).returncode:
-        sessions = subprocess.run(["tmux", "list-sessions", "-F", "#{session_last_attached} #{session_name}"],
-                                  capture_output=True, text=True).stdout.splitlines()
-        others = sorted((line.split(" ", 1) for line in sessions if line.split(" ", 1)[1] != PHONE),
-                        key=lambda s: int(s[0] or 0), reverse=True)
-        group = ["-t", f"={others[0][1]}"] if others else []
-        tmux("new-session", "-d", "-s", PHONE, *group)
-        tmux("set-option", "-t", f"={PHONE}:", "status", "off")  # set-option takes a pane target, so the colon
+def list_sessions():
+    """Every tmux session, the viewer included, most recently used first. No tmux server means no sessions."""
+    r = subprocess.run(["tmux", "list-sessions", "-F", "\x1f".join(f"#{{{f}}}" for f in SESSION_FIELDS)],
+                       capture_output=True, text=True)
+    rows = [dict(zip(SESSION_FIELDS, line.split("\x1f"))) for line in r.stdout.splitlines()] if r.returncode == 0 else []
+    return sorted(rows, key=lambda s: (int(s["session_last_attached"] or 0), int(s["session_activity"] or 0)), reverse=True)
+
+
+def viewer_target(sessions):
+    """Id of the real session the viewer is grouped with, or None if the viewer or that session is gone."""
+    viewer = next((s for s in sessions if s["session_name"] == VIEWER), None)
+    if not viewer or viewer["session_grouped"] != "1":
+        return None
+    return next((s["session_id"] for s in sessions if s["session_name"] != VIEWER and s["session_grouped"] == "1"
+                 and s["session_group"] == viewer["session_group"]), None)
+
+
+@contextmanager
+def viewer_lock():
+    """One change to the viewer at a time: ttyd's attach and the web server both remake it."""
+    with open(STATE / "viewer.lock", "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def new_real_session():
+    """An ordinary tmux session with tmux's numbered name, which the Mac sees in `tmux ls`. Returns its id."""
+    return tmux("new-session", "-d", "-c", str(Path.home()), "-P", "-F", "#{session_id}").strip()
+
+
+def group_viewer(target):
+    """Make the viewer again, grouped with target ($id). tmux can't move a session to another group.
+    Killing the old viewer ends ttyd's attach, and the page reconnects to the new one. Caller holds viewer_lock."""
+    subprocess.run(["tmux", "kill-session", "-t", f"={VIEWER}"], capture_output=True)
+    tmux("new-session", "-d", "-s", VIEWER, "-t", target)
+    tmux("set-option", "-t", f"={VIEWER}:", "status", "off")  # set-option takes a pane target, so the colon
+    tmux("set-option", "-t", f"={VIEWER}:", "detach-on-destroy", "on")  # killed, its client exits, not moves to the Mac's session
+
+
+def fix_viewer():
+    """Keep the viewer's target while it exists. Else group it with the most recently used real session,
+    or with a new real session if there is none. Returns the target's id. Caller holds viewer_lock."""
+    sessions = list_sessions()
+    target = viewer_target(sessions)
+    if target:
+        return target
+    real = [s["session_id"] for s in sessions if s["session_name"] != VIEWER]
+    target = real[0] if real else new_real_session()
+    group_viewer(target)
+    return target
+
+
+def ensure_viewer():
+    with viewer_lock():
+        return fix_viewer()
+
+
+def kill_old_viewer():
+    """Before _phone, the viewer was named phone. Kill it if it is grouped with a real session: it only showed that
+    session's windows. A phone session standing alone, or grouped only with _phone, holds real work and stays."""
+    sessions = list_sessions()
+    old = next((s for s in sessions if s["session_name"] == OLD_VIEWER and s["session_grouped"] == "1"), None)
+    if old and any(s["session_group"] == old["session_group"] and s["session_name"] not in (OLD_VIEWER, VIEWER)
+                   for s in sessions):
+        tmux("kill-session", "-t", old["session_id"])
+
+
+def sessions_for_phone(target):
+    return [{"id": s["session_id"].lstrip("$"), "name": s["session_name"], "windows": int(s["session_windows"]),
+             "attached": int(s["session_attached"]), "current": s["session_id"] == target}
+            for s in list_sessions() if s["session_name"] != VIEWER]
 
 
 def claude_ttys():
@@ -130,9 +198,8 @@ def status(lines):
 
 
 def list_panes():
-    ensure_phone_session()
-    # The phone session's panes, each once: `list-panes -a` would list a grouped window once per session.
-    out = tmux("list-panes", "-s", "-t", f"={PHONE}", "-F", "\x1f".join(f"#{{{f}}}" for f in PANE_FIELDS))
+    # The viewer's panes, which are the target session's, each once: `list-panes -a` would list a grouped window once per session.
+    out = tmux("list-panes", "-s", "-t", f"={VIEWER}", "-F", "\x1f".join(f"#{{{f}}}" for f in PANE_FIELDS))
     claude = claude_ttys()
     panes = []
     for row in out.splitlines():
@@ -161,9 +228,9 @@ def pane_info(pane, *fields):
 
 def open_pane(pane):
     """Show one pane full screen on the phone: switch the phone's session to it, and zoom it if its window is split.
-    The window is named through the phone's session; a bare %pane could pick the Mac's session and switch the Mac."""
-    ensure_phone_session()
-    tmux("select-window", "-t", f"={PHONE}:{pane_info(pane, 'window_id')[0]}")
+    The window is named through the viewer; a bare %pane could pick the Mac's session and switch the Mac."""
+    ensure_viewer()
+    tmux("select-window", "-t", f"={VIEWER}:{pane_info(pane, 'window_id')[0]}")
     tmux("select-pane", "-t", pane)
     panes, zoomed = pane_info(pane, "window_panes", "window_zoomed_flag")
     if panes != "1" and zoomed == "0":
@@ -213,6 +280,11 @@ def leave_scroll(pane):
 def valid_name(name):
     return (isinstance(name, str) and name.strip() != "" and len(name) <= MAX_NAME
             and not any(unicodedata.category(c) == "Cc" for c in name))
+
+
+def valid_session_name(name):
+    """tmux uses . and : in targets, so a session name can't have them; _phone is the viewer's."""
+    return valid_name(name) and not any(c in name for c in ".:") and name != VIEWER
 
 
 def tmux_literal(name):
@@ -272,8 +344,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.path in STATIC_FILES:
                 return self.reply(200, (STATIC / self.path.lstrip("/")).read_bytes(), STATIC_FILES[self.path])
             if self.path == "/api/panes":
+                target = ensure_viewer()
                 panes = list_panes()
-                return self.reply(200, {"panes": panes, "version": version(INDEX.read_bytes())})
+                return self.reply(200, {"panes": panes, "sessions": sessions_for_phone(target),
+                                        "version": version(INDEX.read_bytes())})
             self.reply(404, {"error": "not found"})
         except TmuxError as e:
             self.reply(502, {"error": str(e)})
@@ -302,8 +376,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/api/windows":
-                ensure_phone_session()  # the new window joins the group, so the Mac has it too
-                return self.reply(200, {"pane": tmux("new-window", "-t", f"={PHONE}:", "-P", "-F", "#{pane_id}").strip().lstrip("%")})
+                ensure_viewer()  # the new window joins the group, so the Mac has it too
+                return self.reply(200, {"pane": tmux("new-window", "-t", f"={VIEWER}:", "-P", "-F", "#{pane_id}").strip().lstrip("%")})
+            if self.path == "/api/sessions":
+                with viewer_lock():
+                    target = new_real_session()
+                    group_viewer(target)
+                return self.reply(200, {"session": target.lstrip("$")})
+            m = SESSION_ROUTE.match(self.path)
+            if m:
+                return self.session_action(f"${m[1]}", m[2], body)
             m = WINDOW_ROUTE.match(self.path)
             if m:
                 window, action = f"@{m[1]}", m[2]
@@ -365,6 +447,25 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self.reply(500, {"error": "server error"})
 
+    def session_action(self, session, action, body):
+        """Switch the phone to a real session, rename it, or close it. Closing the target moves the phone to another."""
+        if session not in {s["session_id"] for s in list_sessions() if s["session_name"] != VIEWER}:
+            return self.reply(404, {"error": f"can't find session {session}"})
+        if action == "rename":
+            if not valid_session_name(body.get("name")):
+                return self.reply(400, {"error": "bad name: a session name can't have . or :"})
+            tmux("rename-session", "-t", session, "--", tmux_literal(body["name"]))
+            return self.reply(200, {"ok": True})
+        with viewer_lock():
+            if action == "switch":
+                if fix_viewer() != session:
+                    group_viewer(session)
+            else:
+                # The viewer still holds a killed target's windows; fix_viewer then kills it and its copy of them.
+                tmux("kill-session", "-t", session)
+                fix_viewer()
+        self.reply(200, {"ok": True})
+
     def proxy_websocket(self):
         """Hand the checked connection to ttyd and copy bytes both ways until either side closes."""
         upstream = socket.socket(socket.AF_UNIX)
@@ -423,12 +524,13 @@ def start_whisper():
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["attach"]:
-        # What ttyd runs for each terminal connection: attach to the phone's session, made again if it is gone.
-        ensure_phone_session()
-        os.execvp("tmux", ["tmux", "attach", "-t", f"={PHONE}"])
+        # What ttyd runs for each terminal connection: attach to the viewer, made again if it is gone.
+        ensure_viewer()
+        os.execvp("tmux", ["tmux", "attach", "-t", f"={VIEWER}"])
     if not (PUBLIC_ORIGIN and ALLOWED_LOGIN):
         sys.exit("TMUX_PHONE_ORIGIN and TMUX_PHONE_LOGIN must be set; run ./install.sh")
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    kill_old_viewer()
     start_ttyd()
     start_whisper()
     keep_awake()

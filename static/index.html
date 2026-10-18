@@ -33,21 +33,23 @@
   button:disabled { color: var(--dim); }
   button.primary { color: var(--green); }
   button.danger { color: var(--red); }
-  /* The page draws into the home-indicator gap at the bottom, where the status line goes, so the key bar sits
-     above the gesture zone. With the keyboard up there is no gap, and the status line is one row. */
+  /* The clock strip is the home-indicator area itself, so the key bar sits as low as it can, right above it.
+     With the keyboard up, or on a screen with no home indicator, the strip is 20px. */
   :root { --strip: max(env(safe-area-inset-bottom), 20px); }
   body.keyboard { --strip: 20px; }
   .view { position: absolute; top: env(safe-area-inset-top); left: 0; right: 0; bottom: var(--strip);
     display: flex; flex-direction: column; }
-  /* The strip shows the time. The phone's tmux session has its status line turned off. */
-  #statusline { position: absolute; left: 0; right: 0; bottom: 0; height: var(--strip); display: flex; align-items: center;
-    justify-content: center; background: var(--bg); color: #a8a8a8; font-size: 12px; line-height: 20px; white-space: nowrap; }
+  /* The strip shows the time in its top part, over the home indicator's zone; nothing in it is tappable.
+     A dim line splits it from the key bar or the list. The phone's tmux session has its status line turned off. */
+  #statusline { position: absolute; left: 0; right: 0; bottom: 0; height: var(--strip); display: flex; align-items: flex-start;
+    justify-content: center; padding-top: 2px; border-top: 1px solid var(--line); background: var(--bg); color: #a8a8a8;
+    font-size: 12px; line-height: 15px; white-space: nowrap; }
   .hidden { display: none !important; }
   header { display: flex; align-items: center; padding: 0 2px; border-bottom: 1px solid var(--line); }
   header h1 { font-size: inherit; color: var(--green); margin: 0 6px; flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  #list-body { flex: 1; overflow-y: auto; padding-bottom: 24px; }
+  #list-body { flex: 1; overflow-y: auto; }
   .window-name { color: var(--green); padding: 12px 8px 2px; }
   .pane { display: block; width: 100%; text-align: left; padding: 4px 8px 4px 24px; }
   .pane .top { display: flex; gap: 8px; }
@@ -66,6 +68,15 @@
   .acts { display: flex; flex-basis: 100%; gap: 12px; }
   .acts button { min-height: 36px; padding: 0 4px; }
   .add-window { margin: 12px 4px 0; }
+  /* The session row at the top of the list: session: [0] [work], the phone's session in reverse video. */
+  #sessions { display: flex; flex-wrap: wrap; align-items: center; padding: 4px 4px 4px 8px; border-bottom: 1px solid var(--line); }
+  #sessions .label { color: var(--dim); margin-right: 2px; }
+  #sessions button { min-height: 36px; padding: 0 4px; }
+  #sessions .current { background: var(--fg); color: var(--bg); }
+  #sessions .current::before, #sessions .current::after { color: inherit; }
+  #sessions .session { flex-basis: 100%; padding: 6px 0 0; }
+  #sessions .session .name { flex: 0 1 auto; margin-left: 0; padding: 0 1ch; }
+  #sessions .add-session { margin: 6px 0 4px; }
   .rename { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--green);
     border-radius: 0; padding: 0 4px; outline: none; }
 
@@ -158,7 +169,7 @@ const $ = (id) => document.getElementById(id);
 const STATUS_LABEL = { needs_you: "needs you", working: "working", idle: "idle" };
 let current = null;  // id of the pane open on the phone
 let lastTitle = {};
-let panes = [], editMode = false, renaming = false;  // the list skips its refresh while a name is being typed
+let panes = [], sessions = [], editMode = false, renaming = false;  // the list skips its refresh while a name is being typed
 
 // iOS keeps the layout height when the keyboard opens, and scrolls the page to show the focused input.
 // Undo the scroll and pin the page to what is actually visible above the keyboard and its accessory bar.
@@ -191,7 +202,7 @@ async function post(path, body = {}) {
 async function act(path, body) {
   try { return await post(path, body); } catch (e) {
     toast(e.message);
-    if (/can't find (pane|window)/.test(e.message)) { current = null; showList(); }
+    if (/can't find (pane|window|session)/.test(e.message)) { current = null; showList(); }
     return null;
   }
 }
@@ -212,6 +223,7 @@ async function loadPanes() {
     return;
   }
   panes = fresh.panes;
+  sessions = fresh.sessions;
   if (fresh.version !== VERSION) reloadWhenSafe();
   for (const p of panes) lastTitle[p.id] = p.title || p.command;
   if (!renaming) renderPanes();
@@ -233,12 +245,13 @@ function renderPanes() {
     windows.get(p.window).panes.push(p);
   }
   const addWindow = editMode ? `<button class="br primary add-window" data-act="new-window">new window</button>` : "";
+  const top = renderSessions();
   if (!panes.length) {
-    $("list-body").innerHTML = `<div class="window-name">No tmux panes. Tap [edit], then [new window].</div>${addWindow}`;
+    $("list-body").innerHTML = `${top}<div class="window-name">No tmux panes. Tap [edit], then [new window].</div>${addWindow}`;
     return;
   }
   const chip = (p) => p.status ? `<span class="chip ${p.status}">${STATUS_LABEL[p.status]}</span>` : "";
-  $("list-body").innerHTML = [...windows].map(([index, w]) => `
+  $("list-body").innerHTML = top + [...windows].map(([index, w]) => `
     <div class="window-name">
       <span>${index}:</span><span class="name rn-target">${esc(w.name)}</span>
       ${editMode ? `<span class="acts"><button class="br" data-act="rename-window" data-id="${w.id}">rename</button><button class="br primary" data-act="add-pane" data-id="${w.id}">new pane</button></span>` : ""}
@@ -259,6 +272,28 @@ function renderPanes() {
         </div>
         <div class="line">${esc(p.last_line || " ")}</div>
       </button>`).join("")}`).join("") + addWindow;
+}
+
+// The session row: tap a session to show its windows on the phone. Hidden with one session, outside edit mode.
+// In edit mode each session gets [rename] and [close], and the row ends with [new session].
+function renderSessions() {
+  if (!editMode) {
+    if (sessions.length < 2) return "";
+    return `<div id="sessions"><span class="label">session:</span>${sessions.map((s) =>
+      `<button class="br${s.current ? " current" : ""}" data-act="switch-session" data-id="${s.id}">${esc(s.name)}</button>`).join("")}</div>`;
+  }
+  return `<div id="sessions"><span class="label">session:</span>${sessions.map((s) => `
+    <div class="window-name session">
+      <span class="name rn-target${s.current ? " current" : ""}">${esc(s.name)}</span>
+      <span class="acts"><button class="br" data-act="rename-session" data-id="${s.id}">rename</button><button class="br danger" data-act="close-session" data-id="${s.id}">close</button></span>
+    </div>`).join("")}<button class="br primary add-session" data-act="new-session">new session</button></div>`;
+}
+
+// A session change remakes the phone's tmux session, which ends the terminal's attach; connect again to the new one.
+async function sessionAct(path, body) {
+  const r = await act(path, body);
+  if (r && socket) connect();
+  loadPanes();
 }
 
 // [rename] swaps the name for a text box. Enter saves; Escape or tapping away keeps the old name.
@@ -293,8 +328,17 @@ $("list-body").addEventListener("click", async (e) => {
     if (b) openPane(b.dataset.pane);
     return;
   }
-  const id = a.dataset.id, target = a.closest(".window-name, .pane").querySelector(".rn-target");
-  if (a.dataset.act === "rename-window") {
+  const id = a.dataset.id, target = a.closest(".window-name, .pane")?.querySelector(".rn-target");
+  if (a.dataset.act === "switch-session") {
+    if (!sessions.find((s) => s.id === id).current) sessionAct(`/api/sessions/${id}/switch`);
+  } else if (a.dataset.act === "rename-session") {
+    rename(target, sessions.find((s) => s.id === id).name, `/api/sessions/${id}/rename`);
+  } else if (a.dataset.act === "close-session") {
+    const s = sessions.find((s) => s.id === id), w = s.windows === 1 ? "1 window" : `${s.windows} windows`;
+    if (confirm(`Close session "${s.name}"? Its ${w} close, and anything running in them stops.`)) sessionAct(`/api/sessions/${id}/close`);
+  } else if (a.dataset.act === "new-session") {
+    sessionAct("/api/sessions");
+  } else if (a.dataset.act === "rename-window") {
     rename(target, panes.find((p) => p.window_id === id).window_name, `/api/windows/${id}/rename`);
   } else if (a.dataset.act === "rename-pane") {
     rename(target, panes.find((p) => p.id === id).title, `/api/panes/${id}/rename`);

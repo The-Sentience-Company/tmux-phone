@@ -114,15 +114,20 @@ def main():
     def pane_list():
         status, body = request("/api/panes")
         assert status == 200, f"GET /api/panes returned {status}: {body[:200]!r}"
-        listed = sorted(p["id"] for p in json.loads(body)["panes"])
-        # The phone's tmux session shares the Mac session's windows, so `list-panes -a` lists them twice; count each once.
-        real = sorted(set(tmux("list-panes", "-a", "-F", "#{pane_id}").replace("%", "").split()))
-        assert listed == real, f"list shows {listed}, tmux has {real}"
-    check("pane list matches tmux", pane_list)
+        data = json.loads(body)
+        names = [s["name"] for s in data["sessions"]]
+        assert "_phone" not in names, f"the phone's own viewer session is in the session list: {names}"
+        current = [s for s in data["sessions"] if s["current"]]
+        assert len(current) == 1, f"expected one current session, got {current}"
+        listed = sorted(p["id"] for p in data["panes"])
+        # The list shows the phone's chosen session: compare with that session's panes, not with _phone's.
+        real = sorted(tmux("list-panes", "-s", "-t", "$" + current[0]["id"], "-F", "#{pane_id}").replace("%", "").split())
+        assert listed == real, f"list shows {listed}, session {current[0]['name']} has {real}"
+    check("pane list matches the phone's session in tmux", pane_list)
 
     def terminal():
-        # The stream shows the phone's own tmux session. Attach at its window's size so the Mac's layout doesn't change.
-        pane, columns, rows = tmux("display-message", "-p", "-t", "=phone:", "#{pane_id} #{window_width} #{window_height}").split()
+        # The stream shows the phone's own tmux session, _phone. Attach at its window's size so the Mac's layout doesn't change.
+        pane, columns, rows = tmux("display-message", "-p", "-t", "=_phone:", "#{pane_id} #{window_width} #{window_height}").split()
         status, text = terminal_stream(ORIGIN, seconds=3, columns=int(columns), rows=int(rows))
         assert " 101 " in status, f"websocket handshake: {status}"
         assert text, "connected, but no terminal output arrived (the 'Reconnecting…' bug)"

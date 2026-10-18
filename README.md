@@ -8,10 +8,10 @@ It's for checking on and replying to Claude Code agents running in tmux panes. I
 
 - **Pane list:** every tmux pane, grouped by window. Each shows its title, its last line, and a status for Claude Code panes (`[needs you]` / `[working]` / `[idle]`). Refreshes every 3 s.
 - **Open a pane:** tap it. The phone switches to it and zooms it if its window is split. The screen is the real terminal: a small xterm.js client on the page, talking to ttyd, which attaches to the phone's own tmux session (see below). Type straight into it. It reconnects by itself if the connection drops.
-- **Own session:** the phone attaches to a tmux session named `phone`, grouped with your most recently used session: same windows and panes, but its own current window. Switching windows on the phone does not move the Mac, and a window made on either shows on both. The server makes `phone` when it is missing (also after the Mac session is gone), grouped with whatever session was used last. Zoom belongs to the window, so a pane the phone zooms is zoomed on the Mac too, until you go back to the list.
-- **Clock:** the strip at the very bottom of the screen (the iPhone home-indicator gap), below the key bar and in the list, shows the time as `HH:MM`. The phone's tmux session has tmux's status line turned off.
+- **Own session:** the phone attaches to a hidden tmux session named `_phone`, grouped with one real session (see Sessions): same windows and panes, but its own current window. Switching windows on the phone does not move the Mac, and a window made on either shows on both. `_phone` is never in the session list. Zoom belongs to the window, so a pane the phone zooms is zoomed on the Mac too, until you go back to the list.
+- **Clock:** the strip at the very bottom of the screen is the iPhone home-indicator area. It shows the time as `HH:MM` at its top, under a dim line, below the key bar and below the list. The phone's tmux session has tmux's status line turned off.
 - **Buttons:** Close pane in the pane view.
-- **Edit:** `[edit]` on the list adds `[rename]` and `[new pane]` to each window, `[rename]` and `[close]` to each pane, and a `[new window]` row at the bottom. Rename is inline: Enter saves, Escape or tapping away cancels. `[new pane]` splits side by side if the window is wide, else one above the other, and opens the new pane. Window names stick (renaming turns off tmux's automatic-rename for that window). Claude Code sets its own pane title, so it may rename a renamed Claude pane back.
+- **Edit:** `[edit]` on the list adds `[rename]` and `[close]` to each session (see Sessions), and `[rename]` and `[new pane]` to each window, `[rename]` and `[close]` to each pane, and a `[new window]` row at the bottom. Rename is inline: Enter saves, Escape or tapping away cancels. `[new pane]` splits side by side if the window is wide, else one above the other, and opens the new pane. Window names stick (renaming turns off tmux's automatic-rename for that window). Claude Code sets its own pane title, so it may rename a renamed Claude pane back.
 - **Zoom:** pinch the terminal to change its font size (8 to 20). tmux re-fits to the new size. The size is kept for next time.
 - **Scroll:** swipe on the terminal. It works like the mouse wheel on the Mac: in Claude Code it scrolls the conversation, in a shell it scrolls the pane's history. The text follows the finger: the page sends one wheel event per row height times the lines one event scrolls (5 in tmux's copy mode, 1 in Claude Code). While scrolled back, `[↓ bottom]` shows at the bottom right of the terminal; tap it to go back to the bottom. Typing, a key bar key, or a paste hides it.
 - **Photo:** tap it for `[paste] [library]` just above the key bar. `[paste]` takes the image on the clipboard (e.g. a screenshot after "Copy and Delete"); iOS shows its own Paste button to tap first. `[library]` opens the photo picker. Either way the image is pasted into the pane's input. Claude Code shows it as `[Image #N]`.
@@ -22,6 +22,17 @@ It's for checking on and replying to Claude Code agents running in tmux panes. I
 - **Keyboard:** the page is pinned to the area above the iOS keyboard, so the header, the terminal (refit, so tmux reflows) and the key bar all stay visible.
 - **Look:** a terminal look throughout: black, monospace, square, `[bracketed]` header buttons.
 - **Dictation:** tap mic, talk, tap it again (it shows the time while recording). Whisper large-v3-turbo transcribes it on the Mac in about a second and pastes the text into the pane. Nothing is submitted until you press Enter. The audio never leaves the Mac.
+
+## Sessions
+
+The list shows the windows of one real tmux session, the phone's target. With more than one session, a row at the top reads `session: [0] [work] [scratch]`, the target in reverse video. Tap another to switch: the server makes `_phone` again, grouped with that session, and the terminal reconnects to it. The target is the session `_phone` is grouped with, so it is kept across page reloads and server restarts.
+
+- **Default:** the most recently used real session.
+- **None at all:** the phone makes a real session with tmux's numbered name (`tmux new-session -d`). It is an ordinary session: the Mac sees it in `tmux ls` and can attach to it.
+- **More later:** a session made on the Mac shows in the row. The phone never switches away from, or kills, a session that still exists.
+- **Target gone:** if the target session is closed, the phone moves to the most recently used real session, or makes one if there is none.
+- **Edit mode:** each session gets `[rename]` and `[close]`, and the row ends with `[new session]`, which makes a real session and switches the phone to it. `[close]` asks first and says how many windows close with it. A session name can't have `.` or `:` (tmux uses them in targets), or be `_phone`.
+- **Upgrade:** older versions named the viewer `phone`. On start, the server kills a `phone` session that is grouped with another session, as it only showed that session's windows. A `phone` session standing alone holds real work, so it stays and shows in the list as `phone`.
 
 tmux resizes to fit the phone while it's attached. It resizes back when you use the Mac again.
 
@@ -54,12 +65,12 @@ Logs: `~/.local/state/tmux-phone/server.log`.
 ## Smoke test
 
 `install.sh` ends by running `./smoke_test.py <url>` against the live install, through the tailnet URL. Run it on its own after any change. Each check confirms the result you would see, not a step on the way:
-- the pane list matches tmux (each pane once; the phone's session lists the shared windows again)
+- the pane list matches the target session's panes in tmux, and `_phone` is not in the session list
 - the terminal stream shows the screen you're on
 - dictation returns the spoken words
 - other websites get 403
 
-It only reads. Apart from the server making the `phone` session if it is missing, it never creates, switches, types into or resizes anything in your tmux, so it doesn't cover opening, pasting, photos or scrolling.
+It only reads. Apart from the server making `_phone` if it is missing, it never creates, switches, types into or resizes anything in your tmux, so it doesn't cover opening, pasting, photos or scrolling.
 
 ## Security
 
@@ -72,7 +83,7 @@ Anyone who gets in has a full shell on the Mac, so:
 
 ## Assumptions
 
-- One tmux server on the default socket. The phone's session is grouped with the session used most recently when it was made; panes in other, ungrouped sessions are not in the list.
+- One tmux server on the default socket. The list shows one session's panes at a time; switch with the session row.
 - tmux has `set -g mouse on`. A swipe is sent as mouse wheel input, which tmux acts on only with the mouse on.
 - A pane counts as Claude Code if its foreground process is named `claude`. The status chips read Claude Code's screen: the `❯` input box and the spinner line. A Claude Code UI change can break them.
 
