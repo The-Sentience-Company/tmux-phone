@@ -21,6 +21,8 @@ const LOGIN = "test@example.com";
 const MODEL = path.join(os.homedir(), ".local/state/tmux-phone/models/ggml-large-v3-turbo-q5_0.bin");
 const PROMPT = "phone$ ";
 const RECONNECT_PROMPT = "Press ⏎ to Reconnect";
+// A 1x1 PNG.
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 // Short base path: tmux and ttyd sockets live under it, and Unix socket paths max out near 104 bytes.
 const base = fs.mkdtempSync("/tmp/tmux-phone-test-");
@@ -186,6 +188,11 @@ async function main() {
         if (document.body && document.body.textContent.includes(text)) window.__sawReconnectPrompt = true;
       }).observe(document, { childList: true, subtree: true, characterData: true });
     }, RECONNECT_PROMPT);
+    // Playwright can't grant WebKit clipboard access, so the clipboard holds one PNG, as after "Copy and Delete".
+    await page.addInitScript((b64) => {
+      const png = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      navigator.clipboard.read = async () => [new ClipboardItem({ "image/png": new Blob([png], { type: "image/png" }) })];
+    }, PNG_B64);
     await page.goto("/");
     await page.tap(`button[data-pane="${paneId}"]`);
 
@@ -261,12 +268,11 @@ async function main() {
       assert(!(await page.locator('[data-mod="ctrl"].armed').count()), "Ctrl is still armed after one key");
     });
 
-    await check("a photo pastes its saved path into the pane without pressing Enter", async () => {
+    // Clears the pane, runs send, then expects one prompt line holding a saved uploads/ path, not run.
+    async function expectPastedPath(send) {
       tmux("send-keys", "-t", pane, "clear", "Enter");
       await waitFor(() => tmux("capture-pane", "-p", "-t", pane).trim() === PROMPT.trim(), 5000, "a clear prompt");
-      // A 1x1 PNG.
-      const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==", "base64");
-      await page.setInputFiles("#file", { name: "dot.png", mimeType: "image/png", buffer: png });
+      await send();
       const uploads = path.join(state, "uploads");
       const lines = await waitFor(() => {
         const l = tmux("capture-pane", "-p", "-J", "-t", pane).split("\n").filter((s) => s.trim());
@@ -278,6 +284,22 @@ async function main() {
              `expected one unexecuted prompt line with the path, pane shows:\n${now.join("\n")}`);
       const pasted = now[0].slice(PROMPT.length).trim();
       assert(fs.existsSync(pasted), `pasted path ${pasted} is not a saved file (first seen: ${lines.join(" | ")})`);
+      tmux("send-keys", "-t", pane, "C-u");
+    }
+
+    await check("a photo pastes its saved path into the pane without pressing Enter", async () => {
+      await expectPastedPath(() => page.setInputFiles("#file", { name: "dot.png", mimeType: "image/png", buffer: Buffer.from(PNG_B64, "base64") }));
+    });
+
+    await check("[photo] then [paste] pastes the clipboard image's saved path without pressing Enter", async () => {
+      await page.tap("#attach");
+      assert(await page.locator("#paste-photo").isVisible() && await page.locator("#library").isVisible(), "the photo menu did not open");
+      await expectPastedPath(() => page.tap("#paste-photo"));
+      assert(!(await page.locator("#photo-menu").isVisible()), "the photo menu is still open");
+      await page.tap("#attach");
+      await page.tap('[data-key="1"]');  // a tap elsewhere closes it
+      assert(!(await page.locator("#photo-menu").isVisible()), "a tap outside did not close the menu");
+      tmux("send-keys", "-t", pane, "C-u");
     });
 
     await check("the pane view has no message box and no Send button", async () => {
