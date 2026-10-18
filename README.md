@@ -41,6 +41,17 @@ launchctl kickstart -k gui/$(id -u)/com.tmux-phone
 
 Logs: `~/.local/state/tmux-phone/server.log`.
 
+## Smoke test
+
+`install.sh` ends by running `./smoke_test.py <url>` against the live install, through the tailnet URL. Run it on its own after any change. Each check confirms the result you would see, not a step on the way:
+- the pane list shows a new pane
+- the message box runs a command in it
+- the terminal stream shows that output
+- dictation returns the spoken words
+- other websites get 403
+
+It opens a scratch tmux window for a few seconds, then closes it and switches back.
+
 ## Security
 
 Anyone who gets in has a full shell on the Mac, so:

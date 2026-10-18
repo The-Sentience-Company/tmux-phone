@@ -84,9 +84,9 @@ ok "server is listening on 127.0.0.1:$PORT (local only)"
 "$TAILSCALE" serve --bg --https=443 "$PORT"
 ok "tailscale serve: $ORIGIN → 127.0.0.1:$PORT (tailnet only, not the internet)"
 
-STATUS="$(curl -s -o /dev/null -w '%{http_code}' "$ORIGIN/api/panes")"
-[[ "$STATUS" == "200" ]] || fail "$ORIGIN/api/panes returned $STATUS. If 403, '$LOGIN' is not the login Tailscale reports for you."
-ok "end-to-end check passed"
+# whisper-server takes a few seconds to load the model after a restart.
+for _ in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:8767/" && break; sleep 0.5; done
+"$PYTHON" "$DIR/smoke_test.py" "$ORIGIN" || fail "smoke test failed. If every check got 403, '$LOGIN' is not the login Tailscale reports for you."
 
 echo
 echo "Open on your phone, then Share → Add to Home Screen: $ORIGIN"
