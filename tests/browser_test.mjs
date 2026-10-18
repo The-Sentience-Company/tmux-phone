@@ -170,14 +170,14 @@ async function main() {
   assert(fs.existsSync(MODEL), `whisper model missing at ${MODEL}; run ./install.sh once`);
   fs.symlinkSync(MODEL, path.join(state, "models/ggml-large-v3-turbo-q5_0.bin"));
 
-  // A private tmux server with one `sh` window and 200 lines of history to scroll back through.
+  // A private tmux server with one `sh` window and 300 lines of history to scroll back through.
   // The mouse is on, as on the Mac: a swipe is sent as wheel input, and tmux decides what it scrolls.
   tmux("new-session", "-d", "-s", "test", "-n", "phone", "-x", "80", "-y", "24", "sh");
   tmux("set", "-g", "mouse", "on");
   const pane = tmux("display-message", "-p", "-t", "test:phone", "#{pane_id}").trim();
   const paneId = pane.slice(1);
-  tmux("send-keys", "-t", pane, "clear; i=1; while [ $i -le 200 ]; do echo history line $i; i=$((i+1)); done", "Enter");
-  await waitFor(() => tmux("capture-pane", "-p", "-t", pane).includes("history line 200"), 5000, "the history to print");
+  tmux("send-keys", "-t", pane, "clear; i=1; while [ $i -le 300 ]; do echo history line $i; i=$((i+1)); done", "Enter");
+  await waitFor(() => tmux("capture-pane", "-p", "-t", pane).includes("history line 300"), 5000, "the history to print");
 
   const port = await freePort(), whisperPort = await freePort();
   await startServer(port, whisperPort);
@@ -204,8 +204,8 @@ async function main() {
     await page.tap(`button[data-pane="${paneId}"]`);
 
     await check("opening the pane shows its text in the terminal", async () => {
-      await waitFor(async () => (await screenText(page)).includes("history line 200"), 10000,
-                    "'history line 200' in the terminal");
+      await waitFor(async () => (await screenText(page)).includes("history line 300"), 10000,
+                    "'history line 300' in the terminal");
     });
 
     await check("the phone's terminal has no tmux status row; the Mac session's status line is unchanged", async () => {
@@ -254,6 +254,22 @@ async function main() {
       assert(paneInfo(pane, "pane_in_mode") === "1", "pane was not scrolled back before the tap");
       await page.tap('[data-key="enter"]');
       await waitFor(() => paneInfo(pane, "pane_in_mode") === "0", 5000, "pane_in_mode=0");
+    });
+
+    await check("a swipe scrolls about as many lines as the finger moves rows; [↓ bottom] goes back and hides", async () => {
+      assert(paneInfo(pane, "pane_in_mode") === "0", "pane is already scrolled back");
+      const rowPx = await page.evaluate(() => document.querySelector(".xterm-screen").getBoundingClientRect().height / term.rows);
+      const px = 450, expected = px / rowPx;
+      await swipeDown(page, px);
+      await sleep(500);
+      const got = Number(paneInfo(pane, "scroll_position"));
+      assert(Math.abs(got - expected) <= 5, `swiped ${px}px at ${rowPx.toFixed(1)}px a row: expected ~${expected.toFixed(1)} lines, scrolled ${got}`);
+      assert(await page.locator("#to-bottom").isVisible(), "[↓ bottom] is not showing");
+      assert((await page.textContent("#to-bottom")) === "↓ bottom", `label is ${await page.textContent("#to-bottom")}`);
+      await page.tap("#to-bottom");
+      await waitFor(() => paneInfo(pane, "pane_in_mode") === "0" || paneInfo(pane, "scroll_position") === "0", 5000,
+                    `the bottom (pane_in_mode=${paneInfo(pane, "pane_in_mode")}, scroll_position=${paneInfo(pane, "scroll_position")})`);
+      assert(!(await page.locator("#to-bottom").isVisible()), "[↓ bottom] still shows");
     });
 
     await check("swiping in an app that reads the mouse sends it the wheel, not tmux scroll mode", async () => {
