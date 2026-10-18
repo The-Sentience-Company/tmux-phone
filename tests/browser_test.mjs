@@ -245,17 +245,16 @@ async function main() {
       assert(!/\[(_phone|test)\]/.test(screen), `the terminal shows a status line:\n${screen}`);
     });
 
-    await check("the strip sits below the key bar and a dim line, and shows the time as HH:MM in its top part", async () => {
-      const text = await page.textContent("#statusline");
-      const now = new Date(), hhmm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-      assert(text === hhmm(now) || text === hhmm(new Date(now - 60000)), `the strip shows ${JSON.stringify(text)}, not ${hhmm(now)}`);
+    await check("the strip sits below the key bar and a dim line, and names the open pane's window in its top part", async () => {
+      await waitFor(async () => (await page.textContent("#statusline")) === `${paneInfo(pane, "window_index")}: ${paneInfo(pane, "window_name")}`,
+                    5000, `the window's name in the strip (shows ${JSON.stringify(await page.textContent("#statusline"))})`);
       const centered = await page.evaluate(() => {
         const r = document.createRange();
         r.selectNodeContents($("statusline"));
         const t = r.getBoundingClientRect(), s = $("statusline").getBoundingClientRect();
         return Math.abs((t.left + t.right) / 2 - (s.left + s.right) / 2) <= 2 && t.top >= s.top && t.bottom <= s.top + 20;
       });
-      assert(centered, "the time is not centered across the strip, in its top 20px");
+      assert(centered, "the name is not centered across the strip, in its top 20px");
       const border = await page.evaluate(() => {
         const st = getComputedStyle($("statusline"));
         return st.borderTopWidth + " " + st.borderTopColor;
@@ -461,74 +460,42 @@ async function main() {
     });
 
     const windowId = paneInfo(pane, "window_id").slice(1);
-    // Edit mode: tap a row to select it, then act from the actions shown right under it.
-    // barLabels: the selected row's actions; with nothing selected, every action in the list.
-    const barLabels = () => page.evaluate(() => {
-      const el = document.querySelector("#list-body .sel");
-      if (!el) return [...document.querySelectorAll("#list-body [data-act]")].map((b) => b.textContent);
-      const acts = el.dataset.sel.startsWith("session") ? $("sessions").querySelector(".acts")
-        : el.dataset.sel.startsWith("window") ? el.nextElementSibling : el.querySelector(".acts");
-      return acts && acts.classList.contains("acts") ? [...acts.querySelectorAll("button")].map((b) => b.textContent) : null;
-    });
-    // A pane is tapped on its title line: once selected, its actions fill the middle of its box.
-    const select = (key) => page.tap(`#list-body [data-sel="${key}"]${key.startsWith("pane") ? " .top" : ""}`);
-    const bar = (act) => page.tap(`#list-body [data-act="${act}"]`);
+    const tapAct = (act, id) => page.tap(`#list-body [data-act="${act}"]${id ? `[data-id="${id}"]` : ""}`);
     const renames = [];
     page.on("request", (r) => { if (r.method() === "POST" && r.url().endsWith("/rename")) renames.push(r.url()); });
 
-    await check("[edit] keeps the plain tree with no buttons in it; the bar's actions follow the selection", async () => {
+    await check("[edit] puts each row's buttons at its right, on the same line; [+ window] follows the last window", async () => {
       await page.tap("#back");
       await page.tap("#edit");
       assert((await page.textContent("#edit")) === "done", "the toggle does not say done");
-      assert(!(await page.locator("#list-body .pane button, #list-body .window-name button").count()), "a row in the list has buttons");
-      assert(await page.locator("#sessions").isVisible(), "the session row is hidden in edit mode");
-      const near = (want) => async () => JSON.stringify(await barLabels()) === JSON.stringify(want);
-      assert(await near(["new session", "new window"])(), `actions with nothing selected: ${await barLabels()}`);
-      const placed = await page.evaluate(() => {
-        const ns = document.querySelector('[data-act="new-session"]'), nw = document.querySelector('[data-act="new-window"]').parentElement;
-        return ns.parentElement.id === "sessions" && ns.previousElementSibling.dataset.sel?.startsWith("session")
-          && nw.previousElementSibling.classList.contains("pane") && !nw.nextElementSibling;
-      });
-      assert(placed, "[new session] does not end the session row, or [new window] does not follow the last window");
-      await select(`window:${windowId}`);
-      assert(await near(["rename", "new pane", "close window"])(), `actions with a window: ${await barLabels()}`);
-      const under = await page.evaluate((key) => {
-        const row = document.querySelector(`[data-sel="${key}"]`).getBoundingClientRect();
-        const acts = document.querySelector(`[data-sel="${key}"]`).nextElementSibling.getBoundingClientRect();
-        const pane = document.querySelector("#list-body .pane").getBoundingClientRect();
-        return acts.top >= row.bottom - 1 && acts.bottom <= pane.top + 1;
-      }, `window:${windowId}`);
-      assert(under, "the window's actions are not between it and its first pane");
-      assert((await page.locator("#list-body [data-act]").count()) === 5, "actions show for more than the selected row");
-      assert(!(await page.locator("#list-body .mark, #list-body .hint").count()), "a mark or hint shows");
-      assert(await page.locator(`#list-body .sel[data-sel="window:${windowId}"]`).count(), "the window is not highlighted");
-      await select(`pane:${paneId}`);
-      assert(await near(["rename", "close pane"])(), `bar with a pane: ${await barLabels()}`);
-      assert((await page.locator("#list-body .sel").count()) === 1, "more than one row is selected");
-      const sid = (await pageSessions(page))[0].id;
-      await select(`session:${sid}`);
-      assert(await near(["rename", "close session"])(), `bar with the phone's session: ${await barLabels()}`);
-      await select(`session:${sid}`);
-      assert(await near(["new session", "new window"])(), `actions after tapping the session again: ${await barLabels()}`);
-      assert(!(await page.locator("#list-body .sel").count()), "a row is still selected");
+      const rows = await page.evaluate(() => [...document.querySelectorAll("#list-body .session-row, #list-body .window-name, #list-body .pane .top")]
+        .map((row) => {
+          const r = row.getBoundingClientRect(), acts = row.querySelector(".acts");
+          const a = acts && acts.getBoundingClientRect(), n = row.querySelector(".name").getBoundingClientRect();
+          return { labels: acts ? [...acts.querySelectorAll("button")].map((b) => b.textContent) : null,
+                   sameLine: a && a.top < n.bottom && a.bottom > n.top,
+                   right: a && Math.abs(a.right - (r.right - parseFloat(getComputedStyle(row).paddingRight))) <= 1 };
+        }));
+      const want = [["rename", "x"], ["rename", "+ pane", "x"], ["rename", "x"]];
+      assert(rows.length === 3 && rows.every((r, i) => JSON.stringify(r.labels) === JSON.stringify(want[i]) && r.sameLine && r.right),
+             `rows: ${JSON.stringify(rows)}`);
+      assert(!(await page.locator("#list-body .pane .line button").count()), "the last-line text has buttons");
+      const order = await page.evaluate(() => [...document.querySelectorAll("#list-body [data-act]")].map((b) => b.textContent));
+      assert(order.indexOf("+ session") === 2 && order.at(-1) === "+ window", `button order: ${order}`);
     });
 
-    await check("in edit mode the 3 s refresh keeps the rows, so a tap during it still selects", async () => {
+    await check("in edit mode the 3 s refresh keeps the rows, and a tap on a row opens nothing", async () => {
+      await sleep(1000);  // the list's own load after [back] and [edit]
       await page.evaluate(() => { document.querySelector("#list-body .pane").__kept = true; });
       await sleep(3500);  // one list refresh
       assert(await page.evaluate(() => document.querySelector("#list-body .pane").__kept), "the refresh rebuilt the rows");
-      for (let i = 0; i < 6; i++) {  // tapping across a refresh
-        await select(`pane:${paneId}`);
-        assert(await page.locator(`#list-body .sel[data-sel="pane:${paneId}"]`).count(), `tap ${i + 1} did not select`);
-        await select(`pane:${paneId}`);
-        assert(!(await page.locator("#list-body .sel").count()), `tap ${i + 1} did not deselect`);
-        await sleep(600);
-      }
+      await page.tap(`#list-body [data-pane="${paneId}"] .line`);
+      await sleep(500);
+      assert(await page.locator("#list").isVisible(), "the tap opened the pane");
     });
 
     await check("[rename] on a window renames it in tmux and in the list, through a list refresh; Enter sends one request", async () => {
-      await select(`window:${windowId}`);
-      await bar("rename");
+      await tapAct("rename-window", windowId);
       const input = page.locator("input.rename");
       assert((await input.inputValue()) === paneInfo(pane, "window_name"), `prefilled with ${await input.inputValue()}`);
       assert(await input.evaluate((el) => el === document.activeElement), "the input is not focused");
@@ -544,20 +511,15 @@ async function main() {
       assert(renames.length === 1, `${renames.length} rename requests`);
     });
 
-    await check("[rename] on a pane saves when the box loses focus; tapping the row in edit mode opens nothing", async () => {
-      await select(`pane:${paneId}`);
-      await bar("rename");
+    await check("[rename] on a pane saves when the box loses focus", async () => {
+      await tapAct("rename-pane", paneId);
       await page.locator("input.rename").fill("my pane");
       await page.locator("input.rename").evaluate((el) => el.blur());  // iOS's Done, or tapping away
       await waitFor(() => paneInfo(pane, "pane_title") === "my pane", 5000, `pane_title (now ${paneInfo(pane, "pane_title")})`);
-      await page.tap(`#list-body [data-sel="pane:${paneId}"] .line`);
-      await sleep(500);
-      assert(await page.locator("#list").isVisible(), "the tap opened the pane");
     });
 
     await check("Escape cancels a rename", async () => {
-      await page.tap(`#list-body [data-sel="pane:${paneId}"] .line`);  // selects it again
-      await bar("rename");
+      await tapAct("rename-pane", paneId);
       await page.locator("input.rename").fill("not saved");
       renames.length = 0;
       await page.keyboard.press("Escape");
@@ -573,10 +535,9 @@ async function main() {
     });
 
     let added = null;
-    await check("[new pane] adds a pane to the window and opens it on the phone", async () => {
+    await check("[+ pane] adds a pane to the window and opens it on the phone", async () => {
       const before = Number(paneInfo(pane, "window_panes"));
-      if (!(await page.locator(`#list-body .sel[data-sel="window:${windowId}"]`).count())) await select(`window:${windowId}`);
-      await bar("add-pane");
+      await tapAct("add-pane", windowId);
       await page.waitForSelector("#pane:not(.hidden)");
       assert(Number(paneInfo(pane, "window_panes")) === before + 1, `window_panes is ${paneInfo(pane, "window_panes")}, was ${before}`);
       added = await page.evaluate(() => current);
@@ -584,41 +545,37 @@ async function main() {
       assert(tmux("display-message", "-p", "-t", "test", "#{pane_id}").trim() === `%${added}`, "tmux's active pane is not the new one");
     });
 
-    await check("[close pane] closes it after a confirm and clears the selection", async () => {
+    await check("[x] on a pane closes it after a confirm", async () => {
       assert(added, "no pane was added");
       await page.tap("#back");
-      await select(`pane:${added}`);
       page.once("dialog", (d) => d.accept());
-      await bar("close-pane");
+      await tapAct("close-pane", added);
       await waitFor(() => !tmux("list-panes", "-a", "-F", "#{pane_id}").includes(`%${added}`), 5000, "the pane to close");
-      await page.waitForSelector(`[data-sel="pane:${added}"]`, { state: "detached" });
-      assert(!(await page.locator("#list-body .sel").count()), "a row is still selected");
+      await page.waitForSelector(`[data-act="close-pane"][data-id="${added}"]`, { state: "detached" });
     });
 
-    await check("[close window] kills the window after a confirm naming its panes", async () => {
-      await bar("new-window");
+    await check("[+ window] opens a new window; [x] on a window kills it after a confirm naming its panes", async () => {
+      await tapAct("new-window");
       await page.waitForSelector("#pane:not(.hidden)");
       const w = paneInfo(`%${await page.evaluate(() => current)}`, "window_id");
       tmux("rename-window", "-t", w, "doomed");
       await page.tap("#back");
-      await page.waitForSelector(`[data-sel="window:${w.slice(1)}"]`, { timeout: 5000 });
-      await select(`window:${w.slice(1)}`);
+      await page.waitForSelector('#list-body .window-name .name:text-is("doomed")', { timeout: 5000 });
       let message = "";
       page.once("dialog", (d) => { message = d.message(); d.accept(); });
-      await bar("close-window");
+      await tapAct("close-window", w.slice(1));
       await waitFor(() => !tmux("list-windows", "-a", "-F", "#{window_id}").split("\n").includes(w), 5000, "the window to close");
       assert(/"doomed"/.test(message) && /1 pane\b/.test(message), `the confirm said: ${message}`);
-      await page.waitForSelector(`[data-sel="window:${w.slice(1)}"]`, { state: "detached" });
+      await page.waitForSelector(`[data-act="close-window"][data-id="${w.slice(1)}"]`, { state: "detached" });
     });
 
     await check("[done] while renaming saves the name, then leaves edit mode", async () => {
-      await select(`pane:${paneId}`);
-      await bar("rename");
+      await tapAct("rename-pane", paneId);
       await page.locator("input.rename").fill("done-saved");
       await page.tap("#edit");
       await waitFor(() => paneInfo(pane, "pane_title") === "done-saved", 5000, `pane_title (now ${paneInfo(pane, "pane_title")})`);
       assert((await page.textContent("#edit")) === "edit", "the toggle does not say edit");
-      assert(!(await page.locator("#list-body [data-act]").count()), "edit mode's actions still show");
+      assert(!(await page.locator("#list-body [data-act]").count()), "edit mode's buttons still show");
       await page.waitForSelector(`button[data-pane="${paneId}"]`);
     });
 
@@ -668,8 +625,7 @@ async function main() {
     await check("a new version does not reload while a name is being typed", async () => {
       await page.tap("#back");
       await page.tap("#edit");
-      await select(`pane:${paneId}`);
-      await bar("rename");
+      await tapAct("rename-pane", paneId);
       await mark();
       deploy();
       await sleep(4000);
@@ -689,7 +645,7 @@ async function main() {
     await check("a session made on the Mac shows in the row; the phone stays on its session", async () => {
       tmux("new-session", "-d", "-s", "work", "-x", "80", "-y", "24", "sh");
       tmux("send-keys", "-t", "=work:", "clear; echo work-marker", "Enter");
-      await page.waitForSelector('#sessions button:text-is("work")', { timeout: 5000 });
+      await page.waitForSelector('#sessions button[data-session]:text-is("work")', { timeout: 5000 });
       assert(await page.locator('#sessions button.current:text-is("test")').count(), "test is not the highlighted session");
       assert(viewerGroupMate() === "test", `_phone is grouped with ${viewerGroupMate()}`);
     });
@@ -717,7 +673,7 @@ async function main() {
     await check("[new session] makes a real session in tmux ls and switches to it", async () => {
       const before = realSessions();
       await page.tap("#edit");
-      await bar("new-session");
+      await tapAct("new-session");
       made = await waitFor(() => realSessions().find((n) => !before.includes(n)), 5000, "a new session in tmux ls");
       assert(/^\d+$/.test(made), `the new session is named ${made}, not tmux's number`);
       await waitFor(async () => (await currentName(page)) === made, 5000, `the phone on ${made} (is ${await currentName(page)})`);
@@ -726,9 +682,7 @@ async function main() {
 
     await check("[rename] on a session renames it; a name with . is refused", async () => {
       const id = (await pageSessions(page)).find((s) => s.name === "work").id;
-      await select(`session:${id}`);
-      assert(JSON.stringify(await barLabels()) === '["rename","switch to","close session"]', `bar: ${await barLabels()}`);
-      await bar("rename");
+      await tapAct("rename-session", id);
       await page.locator("input.rename").fill("my work");
       await page.keyboard.press("Enter");
       await waitFor(() => realSessions().includes("my work"), 5000, `the name in tmux (${realSessions()})`);
@@ -737,13 +691,12 @@ async function main() {
       assert(status === 400, `got ${status}`);
     });
 
-    await check("[close session] on the phone's session closes it after a confirm naming its windows; the phone moves on", async () => {
+    await check("[x] on the phone's session closes it after a confirm naming its windows; the phone moves on", async () => {
       assert(made, "no session was made");
       const id = (await pageSessions(page)).find((s) => s.name === made).id;
       let message = "";
       page.once("dialog", (d) => { message = d.message(); d.accept(); });
-      await select(`session:${id}`);
-      await bar("close-session");
+      await tapAct("close-session", id);
       await waitFor(() => !realSessions().includes(made), 5000, `${made} to close`);
       assert(/1 window\b/.test(message), `the confirm said: ${message}`);
       await waitFor(async () => ["test", "my work"].includes(await currentName(page)), 5000, `the phone on another session (${await currentName(page)})`);

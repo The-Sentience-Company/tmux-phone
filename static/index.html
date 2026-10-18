@@ -313,7 +313,11 @@ function rename(target, name, path) {
   const finish = async (save) => {
     if (finished) return;
     finished = true;
-    if (save && input.value.trim() && input.value !== name) await act(path, { name: input.value });
+    // The name goes back in place at once, so the row is whole again before the save returns.
+    const changed = save && input.value.trim() && input.value !== name;
+    if (changed) target.textContent = input.value;
+    input.replaceWith(target);
+    if (changed) await act(path, { name: input.value });
     renaming = false;
     loadPanes();
   };

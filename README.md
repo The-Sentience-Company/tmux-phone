@@ -26,7 +26,7 @@ It's for checking on and replying to Claude Code agents running in tmux panes. I
 
 ## Sessions
 
-The list shows the windows of one real tmux session, the phone's target. With more than one session, or in edit mode, a row at the top reads `session: [0] [work] [scratch]`, the target in reverse video. Tap another to switch: the server makes `_phone` again, grouped with that session, and the terminal reconnects to it. The target is the session `_phone` is grouped with, so it is kept across page reloads and server restarts.
+The list shows the windows of one real tmux session, the phone's target. With more than one session, a row at the top reads `session: [0] [work] [scratch]`, the target in reverse video. Tap another to switch: the server makes `_phone` again, grouped with that session, and the terminal reconnects to it. The target is the session `_phone` is grouped with, so it is kept across page reloads and server restarts.
 
 - **Default:** the most recently used real session.
 - **None at all:** the phone makes a real session with tmux's numbered name (`tmux new-session -d`). It is an ordinary session: the Mac sees it in `tmux ls` and can attach to it.
