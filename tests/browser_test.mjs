@@ -461,10 +461,18 @@ async function main() {
     });
 
     const windowId = paneInfo(pane, "window_id").slice(1);
-    // Edit mode: tap a row to select it, then act from the bar at the bottom.
-    const barLabels = () => page.$$eval("#edit-bar button", (bs) => bs.map((b) => b.textContent));
-    const select = (key) => page.tap(`#list-body [data-sel="${key}"]`);
-    const bar = (act) => page.tap(`#edit-bar [data-act="${act}"]`);
+    // Edit mode: tap a row to select it, then act from the actions shown right under it.
+    // barLabels: the selected row's actions; with nothing selected, every action in the list.
+    const barLabels = () => page.evaluate(() => {
+      const el = document.querySelector("#list-body .sel");
+      if (!el) return [...document.querySelectorAll("#list-body [data-act]")].map((b) => b.textContent);
+      const acts = el.dataset.sel.startsWith("session") ? $("sessions").querySelector(".acts")
+        : el.dataset.sel.startsWith("window") ? el.nextElementSibling : el.querySelector(".acts");
+      return acts && acts.classList.contains("acts") ? [...acts.querySelectorAll("button")].map((b) => b.textContent) : null;
+    });
+    // A pane is tapped on its title line: once selected, its actions fill the middle of its box.
+    const select = (key) => page.tap(`#list-body [data-sel="${key}"]${key.startsWith("pane") ? " .top" : ""}`);
+    const bar = (act) => page.tap(`#list-body [data-act="${act}"]`);
     const renames = [];
     page.on("request", (r) => { if (r.method() === "POST" && r.url().endsWith("/rename")) renames.push(r.url()); });
 
@@ -475,11 +483,24 @@ async function main() {
       assert(!(await page.locator("#list-body .pane button, #list-body .window-name button").count()), "a row in the list has buttons");
       assert(await page.locator("#sessions").isVisible(), "the session row is hidden in edit mode");
       const near = (want) => async () => JSON.stringify(await barLabels()) === JSON.stringify(want);
-      assert(await near(["new window", "new session"])(), `bar with nothing selected: ${await barLabels()}`);
-      const bar0 = await page.locator("#edit-bar").boundingBox(), strip = await page.locator("#statusline").boundingBox();
-      assert(Math.abs(bar0.y + bar0.height - strip.y) <= 1, `bar ${JSON.stringify(bar0)} is not right above the strip ${JSON.stringify(strip)}`);
+      assert(await near(["new session", "new window"])(), `actions with nothing selected: ${await barLabels()}`);
+      const placed = await page.evaluate(() => {
+        const ns = document.querySelector('[data-act="new-session"]'), nw = document.querySelector('[data-act="new-window"]').parentElement;
+        return ns.parentElement.id === "sessions" && ns.previousElementSibling.dataset.sel?.startsWith("session")
+          && nw.previousElementSibling.classList.contains("pane") && !nw.nextElementSibling;
+      });
+      assert(placed, "[new session] does not end the session row, or [new window] does not follow the last window");
       await select(`window:${windowId}`);
-      assert(await near(["rename", "new pane", "close window"])(), `bar with a window: ${await barLabels()}`);
+      assert(await near(["rename", "new pane", "close window"])(), `actions with a window: ${await barLabels()}`);
+      const under = await page.evaluate((key) => {
+        const row = document.querySelector(`[data-sel="${key}"]`).getBoundingClientRect();
+        const acts = document.querySelector(`[data-sel="${key}"]`).nextElementSibling.getBoundingClientRect();
+        const pane = document.querySelector("#list-body .pane").getBoundingClientRect();
+        return acts.top >= row.bottom - 1 && acts.bottom <= pane.top + 1;
+      }, `window:${windowId}`);
+      assert(under, "the window's actions are not between it and its first pane");
+      assert((await page.locator("#list-body [data-act]").count()) === 5, "actions show for more than the selected row");
+      assert(!(await page.locator("#list-body .mark, #list-body .hint").count()), "a mark or hint shows");
       assert(await page.locator(`#list-body .sel[data-sel="window:${windowId}"]`).count(), "the window is not highlighted");
       await select(`pane:${paneId}`);
       assert(await near(["rename", "close pane"])(), `bar with a pane: ${await barLabels()}`);
@@ -488,8 +509,21 @@ async function main() {
       await select(`session:${sid}`);
       assert(await near(["rename", "close session"])(), `bar with the phone's session: ${await barLabels()}`);
       await select(`session:${sid}`);
-      assert(await near(["new window", "new session"])(), `bar after tapping the session again: ${await barLabels()}`);
+      assert(await near(["new session", "new window"])(), `actions after tapping the session again: ${await barLabels()}`);
       assert(!(await page.locator("#list-body .sel").count()), "a row is still selected");
+    });
+
+    await check("in edit mode the 3 s refresh keeps the rows, so a tap during it still selects", async () => {
+      await page.evaluate(() => { document.querySelector("#list-body .pane").__kept = true; });
+      await sleep(3500);  // one list refresh
+      assert(await page.evaluate(() => document.querySelector("#list-body .pane").__kept), "the refresh rebuilt the rows");
+      for (let i = 0; i < 6; i++) {  // tapping across a refresh
+        await select(`pane:${paneId}`);
+        assert(await page.locator(`#list-body .sel[data-sel="pane:${paneId}"]`).count(), `tap ${i + 1} did not select`);
+        await select(`pane:${paneId}`);
+        assert(!(await page.locator("#list-body .sel").count()), `tap ${i + 1} did not deselect`);
+        await sleep(600);
+      }
     });
 
     await check("[rename] on a window renames it in tmux and in the list, through a list refresh; Enter sends one request", async () => {
@@ -514,7 +548,7 @@ async function main() {
       await select(`pane:${paneId}`);
       await bar("rename");
       await page.locator("input.rename").fill("my pane");
-      await page.tap("#list h1");  // tapping away, as iOS's Done does
+      await page.locator("input.rename").evaluate((el) => el.blur());  // iOS's Done, or tapping away
       await waitFor(() => paneInfo(pane, "pane_title") === "my pane", 5000, `pane_title (now ${paneInfo(pane, "pane_title")})`);
       await page.tap(`#list-body [data-sel="pane:${paneId}"] .line`);
       await sleep(500);
@@ -558,11 +592,15 @@ async function main() {
       await bar("close-pane");
       await waitFor(() => !tmux("list-panes", "-a", "-F", "#{pane_id}").includes(`%${added}`), 5000, "the pane to close");
       await page.waitForSelector(`[data-sel="pane:${added}"]`, { state: "detached" });
-      assert(JSON.stringify(await barLabels()) === '["new window","new session"]', `bar: ${await barLabels()}`);
+      assert(!(await page.locator("#list-body .sel").count()), "a row is still selected");
     });
 
     await check("[close window] kills the window after a confirm naming its panes", async () => {
-      const w = tmux("new-window", "-d", "-P", "-F", "#{window_id}", "-t", "test:", "-n", "doomed", "sh").trim();
+      await bar("new-window");
+      await page.waitForSelector("#pane:not(.hidden)");
+      const w = paneInfo(`%${await page.evaluate(() => current)}`, "window_id");
+      tmux("rename-window", "-t", w, "doomed");
+      await page.tap("#back");
       await page.waitForSelector(`[data-sel="window:${w.slice(1)}"]`, { timeout: 5000 });
       await select(`window:${w.slice(1)}`);
       let message = "";
@@ -580,7 +618,7 @@ async function main() {
       await page.tap("#edit");
       await waitFor(() => paneInfo(pane, "pane_title") === "done-saved", 5000, `pane_title (now ${paneInfo(pane, "pane_title")})`);
       assert((await page.textContent("#edit")) === "edit", "the toggle does not say edit");
-      assert(!(await page.locator("#edit-bar").isVisible()), "the bar still shows");
+      assert(!(await page.locator("#list-body [data-act]").count()), "edit mode's actions still show");
       await page.waitForSelector(`button[data-pane="${paneId}"]`);
     });
 
