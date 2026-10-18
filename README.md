@@ -6,12 +6,14 @@ It's for checking on and replying to Claude Code agents running in tmux panes. I
 
 ## What it does
 
-- **Pane list:** every tmux pane, grouped by window. Each shows its title, its last line, and a status for Claude Code panes (Needs you / Working / Idle). Refreshes every 3 s.
+- **Pane list:** every tmux pane, grouped by window. Each shows its title, its last line, and a status for Claude Code panes (`[needs you]` / `[working]` / `[idle]`). Refreshes every 3 s.
 - **Open a pane:** tap it. The phone switches to it and zooms it if its window is split. The screen is the real terminal: a small xterm.js client on the page, talking to ttyd running `tmux attach`. Type straight into it. It reconnects by itself if the connection drops.
 - **Buttons:** Close pane, New window. Splitting is left to the Mac, since a phone shows one pane at a time.
 - **Scroll:** swipe on the terminal to scroll back through the pane.
 - **Photo:** pick photos and they are pasted into the pane's input. Claude Code shows them as `[Image #N]`.
-- **Key bar:** Mic, Photo, Esc, Enter, arrows, 1/2/3, Tab, ⇧Tab, Model (alt+p), Ctrl-C.
+- **Key bar:** Ctrl, Alt, Mic, Photo, Esc, Enter, arrows, 1/2/3, Tab, ⇧Tab, Model (alt+p), Ctrl-C. Tapping it keeps the keyboard open.
+- **Ctrl and Alt:** tap one, then type a key on the phone's keyboard: Ctrl then b is tmux's prefix, so every tmux command works. It turns off after one key; tap it again to turn it off sooner.
+- **Look:** a terminal look throughout: black, monospace, square, `[bracketed]` buttons.
 - **Dictation:** tap Mic, talk, tap Stop. Whisper large-v3-turbo transcribes it on the Mac in about a second and pastes the text into the pane. Nothing is submitted until you press Enter. The audio never leaves the Mac.
 
 tmux resizes to fit the phone while it's attached. It resizes back when you use the Mac again.

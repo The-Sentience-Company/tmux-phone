@@ -188,6 +188,27 @@ async function main() {
       assert(!(await page.evaluate(() => window.__sawReconnectPrompt)), `the page showed "${RECONNECT_PROMPT}"`);
     });
 
+    await check("tapping a key bar button keeps the keyboard on the terminal", async () => {
+      await page.focus(".xterm-helper-textarea");
+      await page.tap('[data-key="1"]');
+      await waitFor(() => tmux("capture-pane", "-p", "-t", pane).includes(`${PROMPT}1`), 5000, "the tapped 1 in the pane");
+      tmux("send-keys", "-t", pane, "C-u");
+      const active = await page.evaluate(() => document.activeElement.className || document.activeElement.tagName);
+      assert(active.includes("xterm-helper-textarea"), `focus moved to ${active}`);
+    });
+
+    await check("Ctrl, then c typed on the keyboard, stops a running command", async () => {
+      const shell = paneInfo(pane, "pane_current_command");
+      tmux("send-keys", "-t", pane, "sleep 30", "Enter");
+      await waitFor(() => paneInfo(pane, "pane_current_command") === "sleep", 5000, "sleep to start");
+      await page.focus(".xterm-helper-textarea");
+      await page.tap('[data-mod="ctrl"]');
+      await page.keyboard.type("c");
+      await waitFor(() => paneInfo(pane, "pane_current_command") === shell, 3000,
+                    `sleep to stop (pane runs ${paneInfo(pane, "pane_current_command")})`);
+      assert(!(await page.locator('[data-mod="ctrl"].armed').count()), "Ctrl is still armed after one key");
+    });
+
     await check("a photo pastes its saved path into the pane without pressing Enter", async () => {
       tmux("send-keys", "-t", pane, "clear", "Enter");
       await waitFor(() => tmux("capture-pane", "-p", "-t", pane).trim() === PROMPT.trim(), 5000, "a clear prompt");
