@@ -23,9 +23,10 @@ STATE = Path.home() / ".local/state/tmux-phone"
 TTYD_SOCKET = STATE / "ttyd.sock"
 STATIC = Path(__file__).resolve().parent / "static"
 INDEX = STATIC / "index.html"
-# The terminal library the page loads; only these paths are served.
-VENDOR = {"/vendor/xterm.js": "text/javascript; charset=utf-8", "/vendor/xterm.css": "text/css; charset=utf-8",
-          "/vendor/addon-fit.js": "text/javascript; charset=utf-8"}
+# The terminal library, web app manifest and icons the page loads; only these paths are served.
+STATIC_FILES = {"/vendor/xterm.js": "text/javascript; charset=utf-8", "/vendor/xterm.css": "text/css; charset=utf-8",
+                "/vendor/addon-fit.js": "text/javascript; charset=utf-8",
+                "/manifest.json": "application/manifest+json", "/icon-180.png": "image/png", "/icon-512.png": "image/png"}
 MAX_BODY = 64 * 1024
 MAX_AUDIO = 25 * 1024 * 1024
 MAX_IMAGES = 20 * 1024 * 1024  # all images in one paste, before base64
@@ -216,8 +217,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.proxy_websocket()
             if self.path == "/":
                 return self.reply(200, INDEX.read_bytes(), "text/html; charset=utf-8")
-            if self.path in VENDOR:
-                return self.reply(200, (STATIC / self.path.lstrip("/")).read_bytes(), VENDOR[self.path])
+            if self.path in STATIC_FILES:
+                return self.reply(200, (STATIC / self.path.lstrip("/")).read_bytes(), STATIC_FILES[self.path])
             if self.path == "/api/panes":
                 return self.reply(200, {"panes": list_panes()})
             self.reply(404, {"error": "not found"})
