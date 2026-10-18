@@ -155,12 +155,6 @@ def list_panes():
     return panes
 
 
-def phone_windows():
-    """The phone session's windows for the status line, in tmux's order, with the phone's current one marked."""
-    out = tmux("list-windows", "-t", f"={PHONE}", "-F", "#{window_index}\x1f#{window_name}\x1f#{window_active}")
-    return [{"index": int(i), "name": n, "active": a == "1"} for i, n, a in (l.split("\x1f") for l in out.splitlines())]
-
-
 def pane_info(pane, *fields):
     return tmux("display-message", "-p", "-t", pane, "\x1f".join(f"#{{{f}}}" for f in fields)).rstrip("\n").split("\x1f")
 
@@ -279,7 +273,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, (STATIC / self.path.lstrip("/")).read_bytes(), STATIC_FILES[self.path])
             if self.path == "/api/panes":
                 panes = list_panes()
-                return self.reply(200, {"panes": panes, "windows": phone_windows(), "version": version(INDEX.read_bytes())})
+                return self.reply(200, {"panes": panes, "version": version(INDEX.read_bytes())})
             self.reply(404, {"error": "not found"})
         except TmuxError as e:
             self.reply(502, {"error": str(e)})

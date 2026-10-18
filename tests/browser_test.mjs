@@ -216,10 +216,17 @@ async function main() {
       assert(!/\[(phone|test)\]/.test(screen), `the terminal shows a status line:\n${screen}`);
     });
 
-    await check("the status strip sits below the key bar and shows the windows, the current one marked *, and live", async () => {
-      await waitFor(async () => /(^| )\d+:phone\*( |$)/.test(await page.textContent("#sl-windows")), 5000,
-                    `the current window marked in the strip (shows ${await page.textContent("#sl-windows")})`);
-      assert((await page.textContent("#sl-state")) === "live", `state shows ${await page.textContent("#sl-state")}`);
+    await check("the strip sits below the key bar and shows the time as HH:MM, centered", async () => {
+      const text = await page.textContent("#statusline");
+      const now = new Date(), hhmm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      assert(text === hhmm(now) || text === hhmm(new Date(now - 60000)), `the strip shows ${JSON.stringify(text)}, not ${hhmm(now)}`);
+      const centered = await page.evaluate(() => {
+        const r = document.createRange();
+        r.selectNodeContents($("statusline"));
+        const t = r.getBoundingClientRect(), s = $("statusline").getBoundingClientRect();
+        return Math.abs((t.left + t.right) / 2 - (s.left + s.right) / 2) <= 2 && Math.abs((t.top + t.bottom) / 2 - (s.top + s.bottom) / 2) <= 2;
+      });
+      assert(centered, "the time is not centered in the strip");
       const bar = await page.locator("#keys .bar").boundingBox(), strip = await page.locator("#statusline").boundingBox();
       const height = page.viewportSize().height;
       assert(strip.y >= bar.y + bar.height - 1 && Math.abs(strip.y + strip.height - height) <= 1 && strip.height >= 20,
@@ -234,8 +241,6 @@ async function main() {
       await page.tap(`button[data-pane="${other.slice(1)}"]`);
       await waitFor(() => currentWindow("phone") === otherWindow, 5000, `phone's current window ${otherWindow} (is ${currentWindow("phone")})`);
       assert(currentWindow("test") === macWindow, `the Mac's current window moved to ${currentWindow("test")}`);
-      await waitFor(async () => /(^| )\d+:other\*( |$)/.test(await page.textContent("#sl-windows")), 5000,
-                    `'other*' in the strip (shows ${await page.textContent("#sl-windows")})`);
       await page.tap("#back");
       tmux("kill-pane", "-t", other);
       await page.waitForSelector(`button[data-pane="${other.slice(1)}"]`, { state: "detached" });
@@ -297,16 +302,13 @@ async function main() {
 
     await check("the terminal comes back by itself after the server restarts", async () => {
       await stopServer();
-      await waitFor(async () => (await page.textContent("#sl-state")).includes("reconnecting"), 10000,
-                    `'reconnecting' in the strip (shows ${await page.textContent("#sl-state")})`);
+      await waitFor(() => page.evaluate(() => socket.readyState !== WebSocket.OPEN), 10000, "the terminal connection to drop");
       await startServer(port, whisperPort);
       // A line printed after the restart can only show up over a new connection.
       const marker = `after restart ${Date.now()}`;
       tmux("send-keys", "-t", pane, `echo ${marker}`, "Enter");
       await waitFor(async () => (await screenText(page)).includes(`\n${marker}`), 10000, `'${marker}' in the terminal`);
       assert(!(await page.evaluate(() => window.__sawReconnectPrompt)), `the page showed "${RECONNECT_PROMPT}"`);
-      await waitFor(async () => (await page.textContent("#sl-state")) === "live", 5000,
-                    `'live' in the strip (shows ${await page.textContent("#sl-state")})`);
     });
 
     await check("tapping a key bar button keeps the keyboard on the terminal", async () => {
@@ -324,12 +326,11 @@ async function main() {
       await waitFor(() => paneInfo(pane, "pane_current_command") === "sleep", 5000, "sleep to start");
       await page.focus(".xterm-helper-textarea");
       await page.tap('[data-mod="ctrl"]');
-      assert((await page.textContent("#sl-state")).includes("CTRL"), `the strip shows ${await page.textContent("#sl-state")}`);
+      assert(await page.locator('[data-mod="ctrl"].armed').count(), "Ctrl does not show armed");
       await page.keyboard.type("c");
       await waitFor(() => paneInfo(pane, "pane_current_command") === shell, 3000,
                     `sleep to stop (pane runs ${paneInfo(pane, "pane_current_command")})`);
       assert(!(await page.locator('[data-mod="ctrl"].armed').count()), "Ctrl is still armed after one key");
-      assert(!(await page.textContent("#sl-state")).includes("CTRL"), "the strip still shows CTRL");
     });
 
     // Clears the pane, runs send, then expects one prompt line holding a saved uploads/ path, not run.

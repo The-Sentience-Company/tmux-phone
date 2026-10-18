@@ -39,10 +39,9 @@
   body.keyboard { --strip: 20px; }
   .view { position: absolute; top: env(safe-area-inset-top); left: 0; right: 0; bottom: var(--strip);
     display: flex; flex-direction: column; }
-  /* tmux's status line, drawn by the page: the phone's tmux session has its own turned off. */
-  #statusline { position: absolute; left: 0; right: 0; bottom: 0; height: var(--strip); display: flex; align-items: center; gap: 1ch;
-    background: var(--green); color: #000; font-size: 12px; line-height: 20px; padding: 0 1ch; white-space: nowrap; }
-  #sl-windows { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* The strip shows the time. The phone's tmux session has its status line turned off. */
+  #statusline { position: absolute; left: 0; right: 0; bottom: 0; height: var(--strip); display: flex; align-items: center;
+    justify-content: center; background: var(--bg); color: #a8a8a8; font-size: 12px; line-height: 20px; white-space: nowrap; }
   .hidden { display: none !important; }
   header { display: flex; align-items: center; padding: 0 2px; border-bottom: 1px solid var(--line); }
   header h1 { font-size: inherit; color: var(--green); margin: 0 6px; flex: 1; min-width: 0;
@@ -148,7 +147,7 @@
   </div>
 </section>
 
-<div id="statusline"><span id="sl-windows"></span><span id="sl-state"></span></div>
+<div id="statusline"></div>
 
 <div id="toast" class="hidden"></div>
 
@@ -160,7 +159,6 @@ const STATUS_LABEL = { needs_you: "needs you", working: "working", idle: "idle" 
 let current = null;  // id of the pane open on the phone
 let lastTitle = {};
 let panes = [], editMode = false, renaming = false;  // the list skips its refresh while a name is being typed
-let windows = [], online = true;  // the phone session's windows, and whether the last list poll reached the Mac
 
 // iOS keeps the layout height when the keyboard opens, and scrolls the page to show the focused input.
 // Undo the scroll and pin the page to what is actually visible above the keyboard and its accessory bar.
@@ -211,26 +209,21 @@ async function loadPanes() {
     fresh = await r.json();
   } catch (e) {
     if (!renaming) $("list-body").innerHTML = `<div id="list-error">Couldn't load panes: ${esc(e.message)}</div>`;
-    online = false;
-    renderStatus();
     return;
   }
   panes = fresh.panes;
-  windows = fresh.windows;
-  online = true;
-  renderStatus();
   if (fresh.version !== VERSION) reloadWhenSafe();
   for (const p of panes) lastTitle[p.id] = p.title || p.command;
   if (!renaming) renderPanes();
 }
 
-// Like tmux's status line: `0:notes 1:agent*` with the phone's window marked, then the connection and armed Ctrl/Alt.
-// Reconnecting while the last poll failed, or while the terminal's connection is down.
-function renderStatus() {
-  $("sl-windows").textContent = windows.map((w) => `${w.index}:${w.name}${w.active ? "*" : ""}`).join(" ");
-  const live = online && (!socket || socket.readyState === WebSocket.OPEN);
-  $("sl-state").textContent = [mods.ctrl && "CTRL", mods.alt && "ALT", live ? "live" : "reconnecting…"].filter(Boolean).join(" ");
+// The strip at the bottom shows the local time as HH:MM, checked every 15 s.
+function renderClock() {
+  const now = new Date();
+  $("statusline").textContent = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 }
+renderClock();
+setInterval(renderClock, 15000);
 
 // In edit mode a pane row is not a button, so a tap on it opens nothing.
 function renderPanes() {
@@ -338,7 +331,7 @@ async function openPane(id) {
   $("pane").classList.remove("hidden");
   // One terminal connection for the whole visit; tmux switches what it shows.
   if (!socket) startTerminal();
-  loadPanes();  // the status line shows the new current window now, not at the next poll
+  loadPanes();
 }
 
 async function showList() {
@@ -381,7 +374,6 @@ const mods = { ctrl: false, alt: false };
 function setMod(name, on) {
   mods[name] = on;
   document.querySelector(`[data-mod="${name}"]`).classList.toggle("armed", on);
-  renderStatus();
 }
 
 function disarm() {
@@ -577,7 +569,6 @@ function connect() {
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
     retryMs = 1000;
-    renderStatus();
     term.reset();  // tmux redraws the whole screen on attach
     ws.send(encoder.encode(JSON.stringify({ AuthToken: "", columns: term.cols, rows: term.rows })));
   };
@@ -586,7 +577,6 @@ function connect() {
     if (data[0] === 48) term.write(data.subarray(1));  // "0" is output; title and settings are not used
   };
   ws.onclose = () => {
-    renderStatus();
     retryTimer = setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, 5000);
   };
