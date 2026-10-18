@@ -359,6 +359,45 @@ $("mic").addEventListener("click", async () => {
   timer = setInterval(tick, 1000);
 });
 
+// tmux draws on the terminal's alternate screen, so the browser terminal has nothing of its own to scroll.
+// A vertical swipe on it scrolls the tmux pane instead, like a mouse wheel on the Mac. Taps still reach the terminal.
+const LINE_PX = 16;
+let scrollY = null, scrollPx = 0, scrollQueued = 0, scrolling = false, reconnectTimer = null;
+
+async function flushScroll() {
+  if (scrolling || !scrollQueued || !current) return;
+  const lines = scrollQueued;
+  scrollQueued = 0;
+  scrolling = true;
+  await act(`/api/panes/${current}/scroll`, { lines });
+  scrolling = false;
+  flushScroll();
+}
+
+$("term").addEventListener("load", () => {
+  const doc = $("term").contentDocument;
+  // When the terminal's connection ends cleanly (a restart on the Mac), ttyd waits for Enter on a keyboard
+  // the phone doesn't have. Reconnect instead, at most every 2 s so a stopped Mac doesn't loop hot.
+  new MutationObserver(() => {
+    if (!doc.body.textContent.includes("Press ⏎ to Reconnect") || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => { reconnectTimer = null; $("term").src = "/term/"; }, 2000);
+  }).observe(doc.body, { childList: true, subtree: true, characterData: true });
+  doc.addEventListener("touchstart", (e) => { scrollY = e.touches[0].clientY; scrollPx = 0; }, { passive: true });
+  doc.addEventListener("touchmove", (e) => {
+    if (scrollY === null) return;
+    e.preventDefault();
+    const y = e.touches[0].clientY;
+    scrollPx += y - scrollY;  // finger moving down shows older lines
+    scrollY = y;
+    const lines = Math.trunc(scrollPx / LINE_PX);
+    if (!lines) return;
+    scrollPx -= lines * LINE_PX;
+    scrollQueued += lines;
+    flushScroll();
+  }, { passive: false, capture: true });
+  doc.addEventListener("touchend", () => { scrollY = null; }, { passive: true });
+});
+
 // Swipe right on the header goes back to the list; the terminal itself keeps its own touches.
 let touchX = null;
 $("pane-header").addEventListener("touchstart", (e) => { touchX = e.touches[0].clientX; });

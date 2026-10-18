@@ -31,7 +31,7 @@ IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg", b"GIF87a": "
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 WHISPER_HOST, WHISPER_PORT = "127.0.0.1", 8767
 
-PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|send|key|split|close)$")
+PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|send|key|scroll|split|close)$")
 # Phone button name -> tmux send-keys name. Digits answer Claude's numbered menus.
 KEYS = {"enter": "Enter", "escape": "Escape", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
         "tab": "Tab", "shift+tab": "BTab", "ctrl+c": "C-c", "alt+p": "M-p", "1": "1", "2": "2", "3": "3"}
@@ -170,6 +170,12 @@ def save_upload(data):
     return path
 
 
+def leave_scroll(pane):
+    """Typing into a pane that is scrolled back would land in tmux's copy mode, so leave it first."""
+    if pane_info(pane, "pane_in_mode") == ["1"]:
+        tmux("copy-mode", "-q", "-t", pane)
+
+
 def unzoom(pane):
     if pane_info(pane, "window_zoomed_flag") == ["1"]:
         tmux("resize-pane", "-Z", "-t", pane)
@@ -262,6 +268,7 @@ class Handler(BaseHTTPRequestHandler):
                     paths.append(str(path))
                 # Claude Code turns a pasted image path into an attachment, but only at the end of the text.
                 text = " ".join([text.strip(), *paths]).strip()
+                leave_scroll(pane)
                 # Bracketed paste, so a multi-line message arrives as one message, then Enter submits it.
                 tmux("load-buffer", "-b", "phone", "-", stdin=text)
                 tmux("paste-buffer", "-p", "-d", "-b", "phone", "-t", pane)
@@ -271,7 +278,19 @@ class Handler(BaseHTTPRequestHandler):
                 key = KEYS.get(body.get("key"))
                 if not key:
                     return self.reply(400, {"error": "key not allowed"})
+                leave_scroll(pane)
                 tmux("send-keys", "-t", pane, key)
+            elif action == "scroll":
+                # A swipe on the phone; positive is back in history. -e leaves copy mode on reaching the bottom.
+                lines = body.get("lines")
+                if not isinstance(lines, int) or not lines:
+                    return self.reply(400, {"error": "bad lines"})
+                lines = max(-500, min(500, lines))
+                if lines > 0:
+                    tmux("copy-mode", "-e", "-t", pane)
+                    tmux("send-keys", "-t", pane, "-X", "-N", str(lines), "scroll-up")
+                elif pane_info(pane, "pane_in_mode") == ["1"]:
+                    tmux("send-keys", "-t", pane, "-X", "-N", str(-lines), "scroll-down")
             elif action == "split":
                 flag = {"right": "-h", "down": "-v"}.get(body.get("direction"))
                 if not flag:

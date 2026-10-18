@@ -152,12 +152,26 @@ def main():
             raise AssertionError("the pane never received a saved image path")
         check("photo arrives in the pane as a saved file", image)
 
+
         def terminal():
             status, text = terminal_stream(ORIGIN, seconds=3)
             assert " 101 " in status, f"websocket handshake: {status}"
             assert text, "connected, but no terminal output arrived (the 'Reconnecting…' bug)"
             assert MARK in text, f"terminal output arrived ({len(text)} chars) but does not show the pane's {MARK}"
         check("terminal shows the pane's screen", terminal)
+
+        def scroll():
+            # Fill the pane's history first, or there is nothing to scroll back to.
+            tmux("send-keys", "-t", f"%{pane}", "seq 200", "Enter")
+            time.sleep(0.3)
+            status, body = request(f"/api/panes/{pane}/scroll", {"lines": 3})
+            assert status == 200, f"{status}: {body[:200]!r}"
+            mode, position = tmux("display-message", "-p", "-t", f"%{pane}", "#{pane_in_mode} #{scroll_position}").split()
+            assert (mode, position) == ("1", "3"), f"pane is not scrolled back 3 lines (in_mode={mode}, position={position})"
+            status, body = request(f"/api/panes/{pane}/key", {"key": "enter"})
+            assert status == 200, f"{status}: {body[:200]!r}"
+            assert tmux("display-message", "-p", "-t", f"%{pane}", "#{pane_in_mode}") == "0", "a key press left the pane scrolled back"
+        check("swiping scrolls the pane, and typing returns to the bottom", scroll)
 
         def dictation():
             with tempfile.TemporaryDirectory() as d:
