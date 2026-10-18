@@ -71,7 +71,8 @@
      [rename] [close] on a line under each pane, inside its tree line; a [new window] row at the bottom. */
   .window-name, .pane .top { display: flex; align-items: center; gap: 8px; }
   .window-name { gap: 0; flex-wrap: wrap; } .window-name .name { margin-left: 1ch; }
-  .window-name .name { flex: 1 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .window-name .wname { display: flex; flex: 1 0 auto; max-width: 100%; min-width: 0; }
+  .window-name .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .acts { display: flex; flex-basis: 100%; gap: 12px; }
   .window-name .acts { flex-basis: auto; margin-left: auto; }
   .acts button { min-height: 32px; padding: 0 4px; }
@@ -82,7 +83,7 @@
   #sessions button { min-height: 36px; padding: 0 4px; }
   #sessions .current { background: var(--fg); color: var(--bg); }
   #sessions .current::before, #sessions .current::after { color: inherit; }
-  #sessions .session { flex-basis: 100%; padding: 6px 0 0; }
+  #sessions .session { flex-basis: 100%; padding: 0; }
   #sessions .session .name { flex: 0 1 auto; margin-left: 0; padding: 0 1ch; }
   #sessions .add-session { margin: 6px 0 4px; }
   .rename { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--green);
@@ -263,7 +264,7 @@ function renderPanes() {
   const chip = (p) => p.status ? `<span class="status ${p.status}">${STATUS_LABEL[p.status]}</span>` : "";
   $("list-body").innerHTML = top + [...windows].map(([index, w]) => `
     <div class="window-name">
-      <span>${index}:</span><span class="name rn-target">${esc(w.name)}</span>
+      <span class="wname"><span>${index}:</span><span class="name rn-target">${esc(w.name)}</span></span>
       ${editMode ? `<span class="acts"><button class="br" data-act="rename-window" data-id="${w.id}">rename</button><button class="br primary" data-act="add-pane" data-id="${w.id}">new pane</button></span>` : ""}
     </div>
     ${w.panes.map((p, i) => editMode ? `
