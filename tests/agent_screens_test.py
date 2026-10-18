@@ -18,10 +18,10 @@ EXPECTED = {
     "codex_approval": ("needs_you", "Running curl -sI https://example.com | head -1"),
     "codex_question": ("needs_you", "Tmux keeps my windows glowing through the night. I step from pane to pane, and every task stays bright."),
     "codex_idle": ("idle", "Tmux keeps my windows glowing through the night. I step from pane to pane, and every task stays bright."),
-    "cursor-agent_working": ("working", "⠠⠜ Running  39 tokens"),
-    "cursor-agent_approval": ("needs_you", "Skip & tell the agent what to do instead (esc or n)"),
-    "cursor-agent_question": ("needs_you", "│ ↑/↓ option · ←/→ question · Space select · Enter next/submit · Esc to skip                     │"),
-    "cursor-agent_idle": ("idle", "access to get the true response.)"),
+    "cursor_working": ("working", "⠠⠜ Running  39 tokens"),
+    "cursor_approval": ("needs_you", "Skip & tell the agent what to do instead (esc or n)"),
+    "cursor_question": ("needs_you", "│ ↑/↓ option · ←/→ question · Space select · Enter next/submit · Esc to skip                     │"),
+    "cursor_idle": ("idle", "access to get the true response.)"),
 }
 
 failures = 0

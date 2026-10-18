@@ -61,12 +61,14 @@ BULLET = re.compile(r"^[⏺●•] ")
 CLAUDE_NOTICE = re.compile(r"new task\? /clear|Compacted\s+while\s+idle|^[⏺●•] Compacted\b|0: Dismiss\s*$|^\s*1: Learn more\s*$")
 # Claude Code's spinner line ("✻ Thinking…"), or Cursor's (" ⠰⠳ Working").
 SPINNER = re.compile(r"^[✻✶✳✢✽·*+] \S.*…|^ [⠀-⣿]+ \S")
-# The coding agents a pane can run, by process name. For each: its input box, matched against a line and the
-# next one joined by "\n", and a line it shows while it works.
+# The coding agents a pane can run, by process name. Cursor's CLI is started as `agent` or `cursor-agent`.
+AGENT_PROCESS = {"claude": "claude", "codex": "codex", "agent": "cursor", "cursor-agent": "cursor"}
+# For each agent: its input box, matched against a line and the next one joined by "\n", and a line it shows
+# while it works.
 # Claude Code: a rule, then the ❯ line. Cursor: a bar of ▄, then the → line. Codex: the › line, with no rule.
-INPUT_BOX = {"claude": re.compile(r"\s*─{8,}.*\n\s*❯"), "cursor-agent": re.compile(r"\s*▄{8,}.*\n\s*→"),
+INPUT_BOX = {"claude": re.compile(r"\s*─{8,}.*\n\s*❯"), "cursor": re.compile(r"\s*▄{8,}.*\n\s*→"),
              "codex": re.compile(r"›(\s|$)")}
-WORKING = {"claude": SPINNER, "cursor-agent": re.compile(r"ctrl\+c to stop\s*$"), "codex": re.compile(r"to interrupt\)")}
+WORKING = {"claude": SPINNER, "cursor": re.compile(r"ctrl\+c to stop\s*$"), "codex": re.compile(r"to interrupt\)")}
 # Claude Code and Cursor hide the input box while they ask you something. Codex keeps its › line, so its
 # question or approval is known by the hint under it.
 CODEX_ASK = re.compile(r"to confirm\b|to submit (answer|all)\b|enter continue")
@@ -170,10 +172,10 @@ def sessions_for_phone(target):
 
 
 def agent_ttys():
-    """tty -> the coding agent in its foreground: "claude", "codex" or "cursor-agent"."""
+    """tty -> the coding agent in its foreground: "claude", "codex" or "cursor"."""
     out = subprocess.run(["ps", "-A", "-o", "tty=,stat=,comm="], capture_output=True, text=True, env={"LC_ALL": "C"}).stdout
-    return {parts[0]: os.path.basename(parts[2]) for parts in (line.split(None, 2) for line in out.splitlines())
-            if len(parts) == 3 and "+" in parts[1] and os.path.basename(parts[2]) in INPUT_BOX}
+    return {parts[0]: AGENT_PROCESS[os.path.basename(parts[2])] for parts in (line.split(None, 2) for line in out.splitlines())
+            if len(parts) == 3 and "+" in parts[1] and os.path.basename(parts[2]) in AGENT_PROCESS}
 
 
 def body_end(lines, agent):

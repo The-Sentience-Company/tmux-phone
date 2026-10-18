@@ -87,7 +87,7 @@ Anyone who gets in has a full shell on the Mac, so:
 
 - One tmux server on the default socket. The list shows one session's panes at a time; switch with the session row.
 - tmux has `set -g mouse on`. A swipe is sent as mouse wheel input, which tmux acts on only with the mouse on.
-- A pane counts as a coding agent if a process in its foreground is named `claude` (Claude Code), `codex` (OpenAI Codex CLI) or `cursor-agent` (Cursor CLI). tmux names the last two `node`, so the server asks `ps`. The status labels read the agent's screen:
+- A pane counts as a coding agent if a process in its foreground is named `claude` (Claude Code), `codex` (OpenAI Codex CLI) or `agent` / `cursor-agent` (Cursor CLI). tmux names the last two `node`, so the server asks `ps`. The status labels read the agent's screen:
   - **Claude Code:** `needs you` when the `❯` input box is gone, `working` while the spinner line (`✻ Thinking…`) shows.
   - **Codex:** `needs you` when the hint under its `›` line says `to confirm`, `to submit answer` or `enter continue`; `working` while `Working (5s • esc to interrupt)` shows.
   - **Cursor:** `needs you` when the `→` input box between its `▄` and `▀` bars is gone; `working` while that line ends in `ctrl+c to stop`.
