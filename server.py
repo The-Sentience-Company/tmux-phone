@@ -36,7 +36,7 @@ IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg", b"GIF87a": "
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 WHISPER_HOST, WHISPER_PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_WHISPER_PORT", "8767"))
 
-PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|paste|key|scroll|close)$")
+PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|paste|key|close)$")
 # Phone button name -> tmux send-keys name. Digits answer Claude's numbered menus.
 KEYS = {"enter": "Enter", "escape": "Escape", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
         "tab": "Tab", "shift+tab": "BTab", "ctrl+c": "C-c", "alt+p": "M-p", "1": "1", "2": "2", "3": "3"}
@@ -286,17 +286,6 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(400, {"error": "key not allowed"})
                 leave_scroll(pane)
                 tmux("send-keys", "-t", pane, key)
-            elif action == "scroll":
-                # A swipe on the phone; positive is back in history. -e leaves copy mode on reaching the bottom.
-                lines = body.get("lines")
-                if not isinstance(lines, int) or not lines:
-                    return self.reply(400, {"error": "bad lines"})
-                lines = max(-500, min(500, lines))
-                if lines > 0:
-                    tmux("copy-mode", "-e", "-t", pane)
-                    tmux("send-keys", "-t", pane, "-X", "-N", str(lines), "scroll-up")
-                elif pane_info(pane, "pane_in_mode") == ["1"]:
-                    tmux("send-keys", "-t", pane, "-X", "-N", str(-lines), "scroll-down")
             elif action == "close":
                 tmux("kill-pane", "-t", pane)
             self.reply(200, {"ok": True})

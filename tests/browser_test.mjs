@@ -135,7 +135,9 @@ async function main() {
   fs.symlinkSync(MODEL, path.join(state, "models/ggml-large-v3-turbo-q5_0.bin"));
 
   // A private tmux server with one `sh` window and 200 lines of history to scroll back through.
+  // The mouse is on, as on the Mac: a swipe is sent as wheel input, and tmux decides what it scrolls.
   tmux("new-session", "-d", "-s", "test", "-n", "phone", "-x", "80", "-y", "24", "sh");
+  tmux("set", "-g", "mouse", "on");
   const pane = tmux("display-message", "-p", "-t", "test:phone", "#{pane_id}").trim();
   const paneId = pane.slice(1);
   tmux("send-keys", "-t", pane, "clear; i=1; while [ $i -le 200 ]; do echo history line $i; i=$((i+1)); done", "Enter");
@@ -176,6 +178,29 @@ async function main() {
       assert(paneInfo(pane, "pane_in_mode") === "1", "pane was not scrolled back before the tap");
       await page.tap('[data-key="enter"]');
       await waitFor(() => paneInfo(pane, "pane_in_mode") === "0", 5000, "pane_in_mode=0");
+    });
+
+    await check("swiping in an app that reads the mouse sends it the wheel, not tmux scroll mode", async () => {
+      // A small stand-in for Claude Code: alternate screen, SGR mouse codes on, and it logs what it gets.
+      const log = path.join(base, "app-input.log");
+      const app = `import os, sys, tty; sys.stdout.write("\\x1b[?1049h\\x1b[?1000h\\x1b[?1006happ ready"); ` +
+                  `sys.stdout.flush(); tty.setraw(0); f = open("${log}", "ab", 0); ` +
+                  `[f.write(os.read(0, 1024)) for _ in iter(int, 1)]`;
+      const appPane = tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "test", "-n", "app",
+                           "python3", "-c", app).trim();
+      await waitFor(() => paneInfo(appPane, "mouse_sgr_flag") === "1", 5000, "the app to turn on the mouse");
+      await page.tap("#back");
+      await page.tap(`button[data-pane="${appPane.slice(1)}"]`);
+      await waitFor(async () => (await screenText(page)).includes("app ready"), 10000, "'app ready' in the terminal");
+      await swipeDown(page, 300);
+      await waitFor(() => fs.existsSync(log) && fs.readFileSync(log, "latin1").includes("\x1b[<64;"), 5000,
+                    `wheel-up codes in the app's input (got ${JSON.stringify(fs.existsSync(log) ? fs.readFileSync(log, "latin1") : "")})`);
+      assert(paneInfo(appPane, "pane_in_mode") === "0", "the pane went into tmux scroll mode");
+      await page.tap("#back");
+      tmux("kill-pane", "-t", appPane);
+      await page.waitForSelector(`button[data-pane="${appPane.slice(1)}"]`, { state: "detached" });
+      await page.tap(`button[data-pane="${paneId}"]`);
+      await page.waitForSelector("#pane:not(.hidden)");
     });
 
     await check("the terminal comes back by itself after the server restarts", async () => {

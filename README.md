@@ -9,7 +9,7 @@ It's for checking on and replying to Claude Code agents running in tmux panes. I
 - **Pane list:** every tmux pane, grouped by window. Each shows its title, its last line, and a status for Claude Code panes (`[needs you]` / `[working]` / `[idle]`). Refreshes every 3 s.
 - **Open a pane:** tap it. The phone switches to it and zooms it if its window is split. The screen is the real terminal: a small xterm.js client on the page, talking to ttyd running `tmux attach`. Type straight into it. It reconnects by itself if the connection drops.
 - **Buttons:** Close pane, New window. Splitting is left to the Mac, since a phone shows one pane at a time.
-- **Scroll:** swipe on the terminal to scroll back through the pane.
+- **Scroll:** swipe on the terminal. It works like the mouse wheel on the Mac: in Claude Code it scrolls the conversation, in a shell it scrolls the pane's history.
 - **Photo:** pick photos and they are pasted into the pane's input. Claude Code shows them as `[Image #N]`.
 - **Key bar:** Ctrl, Alt, Mic, Photo, Esc, Enter, arrows, 1/2/3, Tab, ⇧Tab, Model (alt+p), Ctrl-C. Tapping it keeps the keyboard open.
 - **Ctrl and Alt:** tap one, then type a key on the phone's keyboard: Ctrl then b is tmux's prefix, so every tmux command works. It turns off after one key; tap it again to turn it off sooner.
@@ -66,6 +66,7 @@ Anyone who gets in has a full shell on the Mac, so:
 ## Assumptions
 
 - One tmux server on the default socket. The terminal attaches to the most recently used session.
+- tmux has `set -g mouse on`. A swipe is sent as mouse wheel input; with the mouse off, it shows up as stray text in the pane.
 - A pane counts as Claude Code if its foreground process is named `claude`. The status chips read Claude Code's screen: the `❯` input box and the spinner line. A Claude Code UI change can break them.
 
 ## Uninstall

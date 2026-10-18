@@ -401,18 +401,19 @@ function connect() {
 }
 
 // tmux draws on the terminal's alternate screen, so the browser terminal has nothing of its own to scroll.
-// A vertical swipe on it scrolls the tmux pane instead, like a mouse wheel on the Mac. A tap opens the keyboard.
-const LINE_PX = 16;
-let scrollY = null, scrollPx = 0, scrollQueued = 0, scrolling = false, swiped = false;
+// A vertical swipe sends mouse wheel input to tmux instead, as the Mac's wheel does: tmux hands it to the app
+// if the app reads the mouse (Claude Code scrolls its own chat), and scrolls the pane's history if not.
+// This needs `mouse on` in tmux, which also makes tmux ask for SGR mouse codes. A tap opens the keyboard.
+const LINE_PX = 16, MAX_WHEEL = 10;
+let scrollY = null, scrollPx = 0, swiped = false;
 
-async function flushScroll() {
-  if (scrolling || !scrollQueued || !current) return;
-  const lines = scrollQueued;
-  scrollQueued = 0;
-  scrolling = true;
-  await act(`/api/panes/${current}/scroll`, { lines });
-  scrolling = false;
-  flushScroll();
+function sendWheel(up, count, x, y) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  const box = term.element.querySelector(".xterm-screen").getBoundingClientRect();
+  const col = Math.min(term.cols, Math.max(1, Math.floor((x - box.left) / (box.width / term.cols)) + 1));
+  // Never the last row: tmux's status line is there, and a wheel on it switches windows.
+  const row = Math.min(term.rows - 1, Math.max(1, Math.floor((y - box.top) / (box.height / term.rows)) + 1));
+  socket.send(encoder.encode("0" + `\x1b[<${up ? 64 : 65};${col};${row}M`.repeat(count)));
 }
 
 $("term-wrap").addEventListener("touchstart", (e) => {
@@ -424,15 +425,14 @@ $("term-wrap").addEventListener("touchmove", (e) => {
   if (scrollY === null) return;
   e.preventDefault();
   e.stopPropagation();  // the terminal's own touch scrolling has nothing to scroll
-  const y = e.touches[0].clientY;
-  scrollPx += y - scrollY;  // finger moving down shows older lines
+  const { clientX: x, clientY: y } = e.touches[0];
+  scrollPx += y - scrollY;  // finger moving down shows older lines, like wheel up
   scrollY = y;
   const lines = Math.trunc(scrollPx / LINE_PX);
   if (!lines) return;
   swiped = true;
   scrollPx -= lines * LINE_PX;
-  scrollQueued += lines;
-  flushScroll();
+  sendWheel(lines > 0, Math.min(Math.abs(lines), MAX_WHEEL), x, y);
 }, { passive: false, capture: true });
 $("term-wrap").addEventListener("touchend", () => {
   scrollY = null;
