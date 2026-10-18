@@ -114,6 +114,27 @@ async function stopServer() {
   await sleep(300);  // let ttyd and whisper-server go before anything reuses their socket and port
 }
 
+// The phone's sessions as the page has them, from its last list poll.
+const pageSessions = (page) => page.evaluate(() => sessions);
+const currentName = async (page) => ((await pageSessions(page)).find((s) => s.current) || {}).name;
+// Real sessions in tmux, the viewer left out.
+const realSessions = () => execFileSync("tmux", ["list-sessions", "-F", "#{session_name}"], { env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().split("\n").filter((n) => n && n !== "_phone");
+// The real session the viewer is grouped with.
+const viewerGroupMate = () => {
+  const rows = tmux("list-sessions", "-F", "#{session_name}\t#{session_grouped}\t#{session_group}").trim().split("\n").map((r) => r.split("\t"));
+  const viewer = rows.find((r) => r[0] === "_phone");
+  return viewer && viewer[1] === "1" ? (rows.find((r) => r[0] !== "_phone" && r[1] === "1" && r[2] === viewer[2]) || [])[0] : undefined;
+};
+
+// The terminal rows inside #term-wrap's box, which is what shows on the phone.
+const visibleText = (page) => page.evaluate(() => {
+  const wrap = $("term-wrap").getBoundingClientRect();
+  return [...document.querySelectorAll(".xterm-rows > div")].filter((r) => {
+    const b = r.getBoundingClientRect();
+    return b.top >= wrap.top - 0.5 && b.bottom <= wrap.bottom + 0.5;
+  }).map((r) => r.textContent.replace(/\u00a0/g, " ")).join("\n");
+});
+
 // What the phone's terminal shows: xterm's rendered rows, one line per row.
 const screenText = (page) => page.evaluate(() =>
   [...document.querySelectorAll(".xterm-rows > div")].map((r) => r.textContent.replace(/ /g, " ")).join("\n"));
@@ -179,6 +200,9 @@ async function main() {
   tmux("send-keys", "-t", pane, "clear; i=1; while [ $i -le 300 ]; do echo history line $i; i=$((i+1)); done", "Enter");
   await waitFor(() => tmux("capture-pane", "-p", "-t", pane).includes("history line 300"), 5000, "the history to print");
 
+  // An old viewer from before _phone: a session named phone, grouped with the Mac's. The server kills it on start.
+  tmux("new-session", "-d", "-s", "phone", "-t", "test");
+
   const port = await freePort(), whisperPort = await freePort();
   await startServer(port, whisperPort);
 
@@ -208,15 +232,20 @@ async function main() {
                     "'history line 300' in the terminal");
     });
 
+    await check("the old grouped phone viewer is gone; _phone is grouped with the Mac's session", async () => {
+      assert(!realSessions().includes("phone"), `sessions: ${realSessions()}`);
+      assert(viewerGroupMate() === "test", `_phone is grouped with ${viewerGroupMate()}`);
+    });
+
     await check("the phone's terminal has no tmux status row; the Mac session's status line is unchanged", async () => {
-      assert(tmux("show-options", "-v", "-t", "=phone:", "status").trim() === "off", "session phone has its status line on");
+      assert(tmux("show-options", "-v", "-t", "=_phone:", "status").trim() === "off", "session _phone has its status line on");
       assert(tmux("show-options", "-v", "-t", "=test:", "status").trim() === "", "the Mac session's status option was changed");
       // tmux's default status line starts with [session name].
       const screen = await screenText(page);
-      assert(!/\[(phone|test)\]/.test(screen), `the terminal shows a status line:\n${screen}`);
+      assert(!/\[(_phone|test)\]/.test(screen), `the terminal shows a status line:\n${screen}`);
     });
 
-    await check("the strip sits below the key bar and shows the time as HH:MM, centered", async () => {
+    await check("the strip sits below the key bar and a dim line, and shows the time as HH:MM in its top part", async () => {
       const text = await page.textContent("#statusline");
       const now = new Date(), hhmm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
       assert(text === hhmm(now) || text === hhmm(new Date(now - 60000)), `the strip shows ${JSON.stringify(text)}, not ${hhmm(now)}`);
@@ -224,9 +253,14 @@ async function main() {
         const r = document.createRange();
         r.selectNodeContents($("statusline"));
         const t = r.getBoundingClientRect(), s = $("statusline").getBoundingClientRect();
-        return Math.abs((t.left + t.right) / 2 - (s.left + s.right) / 2) <= 2 && Math.abs((t.top + t.bottom) / 2 - (s.top + s.bottom) / 2) <= 2;
+        return Math.abs((t.left + t.right) / 2 - (s.left + s.right) / 2) <= 2 && t.top >= s.top && t.bottom <= s.top + 20;
       });
-      assert(centered, "the time is not centered in the strip");
+      assert(centered, "the time is not centered across the strip, in its top 20px");
+      const border = await page.evaluate(() => {
+        const st = getComputedStyle($("statusline"));
+        return st.borderTopWidth + " " + st.borderTopColor;
+      });
+      assert(border === "1px rgb(48, 48, 48)", `the strip's top line is ${border}`);
       const bar = await page.locator("#keys .bar").boundingBox(), strip = await page.locator("#statusline").boundingBox();
       const height = page.viewportSize().height;
       assert(strip.y >= bar.y + bar.height - 1 && Math.abs(strip.y + strip.height - height) <= 1 && strip.height >= 20,
@@ -239,7 +273,7 @@ async function main() {
       assert(otherWindow !== macWindow, "the new window is already the Mac's current window");
       await page.tap("#back");
       await page.tap(`button[data-pane="${other.slice(1)}"]`);
-      await waitFor(() => currentWindow("phone") === otherWindow, 5000, `phone's current window ${otherWindow} (is ${currentWindow("phone")})`);
+      await waitFor(() => currentWindow("_phone") === otherWindow, 5000, `phone's current window ${otherWindow} (is ${currentWindow("_phone")})`);
       assert(currentWindow("test") === macWindow, `the Mac's current window moved to ${currentWindow("test")}`);
       await page.tap("#back");
       tmux("kill-pane", "-t", other);
@@ -397,6 +431,35 @@ async function main() {
       assert(paneInfo(pane, "pane_in_mode") === "0", "the pane went into tmux scroll mode");
     });
 
+    // Rows the terminal box has room for, and rows the terminal has.
+    const termRows = () => page.evaluate(() => {
+      const rowPx = document.querySelector(".xterm-screen").getBoundingClientRect().height / term.rows;
+      return { rows: term.rows, fit: Math.floor($("term-wrap").clientHeight / rowPx + 0.01) };
+    });
+
+    await check("with pane-border-status top, the title row is hidden and the pane's first line shows", async () => {
+      tmux("select-pane", "-t", pane, "-T", "bordertitle");
+      tmux("send-keys", "-t", pane, "clear; echo first-content-line", "Enter");
+      tmux("set-option", "-w", "-t", pane, "pane-border-status", "top");
+      await waitFor(async () => (await termRows()).rows === (await termRows()).fit + 1, 10000,
+                    `one extra terminal row (${JSON.stringify(await termRows())})`);
+      await waitFor(async () => (await screenText(page)).includes("bordertitle"), 5000, "tmux to draw the title row");
+      await waitFor(async () => (await visibleText(page)).includes("first-content-line"), 5000, "the first line on screen");
+      const visible = await visibleText(page);
+      assert(!visible.includes("bordertitle"), `the title row shows:\n${visible}`);
+    });
+
+    await check("with pane-border-status off, nothing is cropped", async () => {
+      tmux("set-option", "-w", "-t", pane, "pane-border-status", "off");
+      await waitFor(async () => (await termRows()).rows === (await termRows()).fit, 10000,
+                    `terminal rows equal to visible rows (${JSON.stringify(await termRows())})`);
+      const top = () => tmux("capture-pane", "-p", "-t", pane).split("\n")[0].trim();
+      await waitFor(async () => (await visibleText(page)).split("\n")[0].trim() === top(), 5000,
+                    `the pane's top line ${JSON.stringify(top())} on the phone's top row (${JSON.stringify((await visibleText(page)).split("\n")[0])})`);
+      assert((await visibleText(page)).includes("first-content-line"), "the first content line is not on screen");
+      tmux("set-option", "-wu", "-t", pane, "pane-border-status");
+    });
+
     const windowId = paneInfo(pane, "window_id").slice(1);
     await check("[edit] then [rename] on a window renames it in tmux and in the list, through a list refresh", async () => {
       await page.tap("#back");
@@ -509,6 +572,103 @@ async function main() {
       await page.keyboard.press("Escape");
       await waitFor(reloaded, 10000, "the page to reload after the rename");
       await page.waitForSelector(`button[data-pane="${paneId}"]`);
+    });
+
+    await check("one session: no session row, and _phone is never listed", async () => {
+      await page.waitForSelector("#list:not(.hidden)");
+      assert(!(await page.locator("#sessions").count()), "the session row shows with one session");
+      assert(!(await pageSessions(page)).some((s) => s.name === "_phone"), "_phone is in the list");
+    });
+
+    await check("a session made on the Mac shows in the row; the phone stays on its session", async () => {
+      tmux("new-session", "-d", "-s", "work", "-x", "80", "-y", "24", "sh");
+      tmux("send-keys", "-t", "=work:", "clear; echo work-marker", "Enter");
+      await page.waitForSelector('#sessions button[data-act="switch-session"]:text-is("work")', { timeout: 5000 });
+      assert(await page.locator('#sessions button.current:text-is("test")').count(), "test is not the highlighted session");
+      assert(viewerGroupMate() === "test", `_phone is grouped with ${viewerGroupMate()}`);
+    });
+
+    await check("tapping another session shows its windows in the list and its pane in the terminal", async () => {
+      const workPane = tmux("display-message", "-p", "-t", "=work:", "#{pane_id}").trim().slice(1);
+      await page.tap('#sessions button:text-is("work")');
+      await page.waitForSelector(`button[data-pane="${workPane}"]`, { timeout: 5000 });
+      assert(!(await page.locator(`button[data-pane="${paneId}"]`).count()), "test's pane is still listed");
+      assert(await page.locator('#sessions button.current:text-is("work")').count(), "work is not highlighted");
+      assert(viewerGroupMate() === "work", `_phone is grouped with ${viewerGroupMate()}`);
+      await page.tap(`button[data-pane="${workPane}"]`);
+      await waitFor(async () => (await screenText(page)).includes("work-marker"), 10000, "'work-marker' in the terminal");
+      assert(tmux("show-options", "-v", "-t", "=work:", "status").trim() === "" &&
+             tmux("show-options", "-v", "-t", "=test:", "status").trim() === "", "a Mac session's status option was changed");
+      await page.tap("#back");
+    });
+
+    await check("a reload keeps the chosen session", async () => {
+      await page.reload();
+      await page.waitForSelector('#sessions button.current:text-is("work")', { timeout: 5000 });
+    });
+
+    let made = null;
+    await check("[new session] makes a real session in tmux ls and switches to it", async () => {
+      const before = realSessions();
+      await page.tap("#edit");
+      await page.tap('[data-act="new-session"]');
+      made = await waitFor(() => realSessions().find((n) => !before.includes(n)), 5000, "a new session in tmux ls");
+      assert(/^\d+$/.test(made), `the new session is named ${made}, not tmux's number`);
+      await waitFor(async () => (await currentName(page)) === made, 5000, `the phone on ${made} (is ${await currentName(page)})`);
+      assert(viewerGroupMate() === made, `_phone is grouped with ${viewerGroupMate()}`);
+    });
+
+    await check("[rename] on a session renames it; a name with . is refused", async () => {
+      const id = (await pageSessions(page)).find((s) => s.name === "work").id;
+      await page.tap(`[data-act="rename-session"][data-id="${id}"]`);
+      await page.locator("input.rename").fill("my work");
+      await page.keyboard.press("Enter");
+      await waitFor(() => realSessions().includes("my work"), 5000, `the name in tmux (${realSessions()})`);
+      const status = await page.evaluate((id) => fetch(`/api/sessions/${id}/rename`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "a.b" }) }).then((r) => r.status), id);
+      assert(status === 400, `got ${status}`);
+    });
+
+    await check("[close] on the phone's session closes it after a confirm naming its windows; the phone moves on", async () => {
+      assert(made, "no session was made");
+      const id = (await pageSessions(page)).find((s) => s.name === made).id;
+      let message = "";
+      page.once("dialog", (d) => { message = d.message(); d.accept(); });
+      await page.tap(`[data-act="close-session"][data-id="${id}"]`);
+      await waitFor(() => !realSessions().includes(made), 5000, `${made} to close`);
+      assert(/1 window\b/.test(message), `the confirm said: ${message}`);
+      await waitFor(async () => ["test", "my work"].includes(await currentName(page)), 5000, `the phone on another session (${await currentName(page)})`);
+      assert(viewerGroupMate() === await currentName(page), `_phone is grouped with ${viewerGroupMate()}`);
+      await page.tap("#edit");
+    });
+
+    await check("with no sessions the phone makes a real one; a later Mac session shows without the phone moving", async () => {
+      tmux("kill-server");
+      const made0 = await waitFor(() => { try { return realSessions()[0]; } catch { return null; } }, 15000, "the phone to make a session");
+      assert(/^\d+$/.test(made0) && realSessions().length === 1, `sessions: ${realSessions()}`);
+      await waitFor(async () => (await currentName(page)) === made0, 10000, `the phone on ${made0}`);
+      tmux("new-session", "-d", "-s", "mac", "sh");
+      await page.waitForSelector('#sessions button:text-is("mac")', { timeout: 5000 });
+      await sleep(4000);
+      assert((await currentName(page)) === made0 && viewerGroupMate() === made0, `the phone moved to ${await currentName(page)}`);
+      assert(!(await pageSessions(page)).some((s) => s.name === "_phone"), "_phone is in the list");
+    });
+
+    await check("without a chosen session, the phone takes the most recently used one", async () => {
+      // A client attaches to mac for a moment, as the Mac would, so mac is the most recently used.
+      // stdin is a pipe that stays open (script refuses node's socket pipes, and at stdin's end it would type ^D
+      // into mac's shell and end the session).
+      const client = spawn("sh", ["-c", "sleep 30 | script -q /dev/null tmux attach -t =mac"],
+                           { env: { ...env, TERM: "xterm-256color" }, stdio: "ignore", detached: true });
+      try {
+        await waitFor(() => tmux("list-clients", "-t", "=mac", "-F", "#{client_name}").trim(), 5000, "a client on mac");
+        tmux("detach-client", "-s", "=mac");
+      } finally {
+        try { process.kill(-client.pid, "SIGKILL"); } catch {}
+      }
+      tmux("kill-session", "-t", "=_phone");
+      await waitFor(async () => (await currentName(page)) === "mac", 10000, `the phone on mac (is ${await currentName(page)})`);
+      assert(viewerGroupMate() === "mac", `_phone is grouped with ${viewerGroupMate()}`);
     });
 
     await context.close();
