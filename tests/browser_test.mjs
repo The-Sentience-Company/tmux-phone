@@ -2,7 +2,7 @@
 // Drives the phone page in WebKit as an iPhone, against a private copy of the app.
 //
 // It never touches your real tmux: the server runs with its own HOME and TMUX_TMPDIR, so every
-// tmux call, ttyd's `tmux attach` included, talks to a private tmux server made here.
+// tmux call, ttyd's attach to the phone's session included, talks to a private tmux server made here.
 //
 // Each check asserts what you would see on the phone, or what the pane shows on the Mac.
 //
@@ -45,6 +45,8 @@ for (const k of ["TMUX", "TMUX_PANE", "XDG_CONFIG_HOME"]) delete env[k];
 const tmux = (...args) => execFileSync("tmux", args, { env, encoding: "utf8" });
 const paneInfo = (pane, field) => tmux("display-message", "-p", "-t", pane, `#{${field}}`).trim();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// The current window of a session; `=` matches the session name exactly.
+const currentWindow = (session) => tmux("display-message", "-p", "-t", `=${session}:`, "#{window_id}").trim();
 
 let server = null, serverLog = "";
 const failures = [];
@@ -206,6 +208,41 @@ async function main() {
                     "'history line 200' in the terminal");
     });
 
+    await check("the phone's terminal has no tmux status row; the Mac session's status line is unchanged", async () => {
+      assert(tmux("show-options", "-v", "-t", "=phone:", "status").trim() === "off", "session phone has its status line on");
+      assert(tmux("show-options", "-v", "-t", "=test:", "status").trim() === "", "the Mac session's status option was changed");
+      // tmux's default status line starts with [session name].
+      const screen = await screenText(page);
+      assert(!/\[(phone|test)\]/.test(screen), `the terminal shows a status line:\n${screen}`);
+    });
+
+    await check("the status strip sits below the key bar and shows the windows, the current one marked *, and live", async () => {
+      await waitFor(async () => /(^| )\d+:phone\*( |$)/.test(await page.textContent("#sl-windows")), 5000,
+                    `the current window marked in the strip (shows ${await page.textContent("#sl-windows")})`);
+      assert((await page.textContent("#sl-state")) === "live", `state shows ${await page.textContent("#sl-state")}`);
+      const bar = await page.locator("#keys .bar").boundingBox(), strip = await page.locator("#statusline").boundingBox();
+      const height = page.viewportSize().height;
+      assert(strip.y >= bar.y + bar.height - 1 && Math.abs(strip.y + strip.height - height) <= 1 && strip.height >= 20,
+             `key bar ${JSON.stringify(bar)}, strip ${JSON.stringify(strip)}, screen height ${height}`);
+    });
+
+    await check("opening a pane in another window moves the phone's current window, not the Mac's", async () => {
+      const other = tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "test:", "-n", "other", "sh").trim();
+      const otherWindow = paneInfo(other, "window_id"), macWindow = currentWindow("test");
+      assert(otherWindow !== macWindow, "the new window is already the Mac's current window");
+      await page.tap("#back");
+      await page.tap(`button[data-pane="${other.slice(1)}"]`);
+      await waitFor(() => currentWindow("phone") === otherWindow, 5000, `phone's current window ${otherWindow} (is ${currentWindow("phone")})`);
+      assert(currentWindow("test") === macWindow, `the Mac's current window moved to ${currentWindow("test")}`);
+      await waitFor(async () => /(^| )\d+:other\*( |$)/.test(await page.textContent("#sl-windows")), 5000,
+                    `'other*' in the strip (shows ${await page.textContent("#sl-windows")})`);
+      await page.tap("#back");
+      tmux("kill-pane", "-t", other);
+      await page.waitForSelector(`button[data-pane="${other.slice(1)}"]`, { state: "detached" });
+      await page.tap(`button[data-pane="${paneId}"]`);
+      await page.waitForSelector("#pane:not(.hidden)");
+    });
+
     await check("swiping down on the terminal scrolls the pane back", async () => {
       await swipeDown(page, 300);
       await waitFor(() => paneInfo(pane, "pane_in_mode") === "1" && Number(paneInfo(pane, "scroll_position")) > 0, 5000,
@@ -244,12 +281,16 @@ async function main() {
 
     await check("the terminal comes back by itself after the server restarts", async () => {
       await stopServer();
+      await waitFor(async () => (await page.textContent("#sl-state")).includes("reconnecting"), 10000,
+                    `'reconnecting' in the strip (shows ${await page.textContent("#sl-state")})`);
       await startServer(port, whisperPort);
       // A line printed after the restart can only show up over a new connection.
       const marker = `after restart ${Date.now()}`;
       tmux("send-keys", "-t", pane, `echo ${marker}`, "Enter");
       await waitFor(async () => (await screenText(page)).includes(`\n${marker}`), 10000, `'${marker}' in the terminal`);
       assert(!(await page.evaluate(() => window.__sawReconnectPrompt)), `the page showed "${RECONNECT_PROMPT}"`);
+      await waitFor(async () => (await page.textContent("#sl-state")) === "live", 5000,
+                    `'live' in the strip (shows ${await page.textContent("#sl-state")})`);
     });
 
     await check("tapping a key bar button keeps the keyboard on the terminal", async () => {
@@ -267,10 +308,12 @@ async function main() {
       await waitFor(() => paneInfo(pane, "pane_current_command") === "sleep", 5000, "sleep to start");
       await page.focus(".xterm-helper-textarea");
       await page.tap('[data-mod="ctrl"]');
+      assert((await page.textContent("#sl-state")).includes("CTRL"), `the strip shows ${await page.textContent("#sl-state")}`);
       await page.keyboard.type("c");
       await waitFor(() => paneInfo(pane, "pane_current_command") === shell, 3000,
                     `sleep to stop (pane runs ${paneInfo(pane, "pane_current_command")})`);
       assert(!(await page.locator('[data-mod="ctrl"].armed').count()), "Ctrl is still armed after one key");
+      assert(!(await page.textContent("#sl-state")).includes("CTRL"), "the strip still shows CTRL");
     });
 
     // Clears the pane, runs send, then expects one prompt line holding a saved uploads/ path, not run.
