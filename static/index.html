@@ -121,6 +121,27 @@
     animation: bounce 0.9s infinite ease-in-out; }
   .dots i:nth-child(2) { animation-delay: 0.15s; } .dots i:nth-child(3) { animation-delay: 0.3s; }
   @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
+  /* The file screen: a folder's entries, or one file in CodeMirror. Its font size is the terminal's. */
+  #files-title.path { direction: rtl; text-align: left; }  /* a long path is cut from the left, so its end shows */
+  #folder { flex: 1; overflow-y: auto; }
+  .entry { display: block; width: 100%; min-height: 36px; text-align: left; padding: 0 8px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .entry.folder { color: var(--cyan); }
+  #file-note { padding: 8px; color: var(--dim); }
+  #file-body { flex: 1; min-height: 0; }
+  #file-body .cm-editor { height: 100%; background: var(--bg); color: var(--fg); font-size: var(--font-size, 13px); }
+  #file-body .cm-editor.cm-focused { outline: none; }
+  #file-body .cm-scroller { font-family: var(--font); line-height: 1.4; -webkit-overflow-scrolling: touch; }
+  #file-body .cm-content { caret-color: var(--fg); }
+  #file-body .cm-gutters { background: var(--bg); color: var(--dim); border-right: 1px solid var(--line); }
+  #file-body .tok-keyword { color: #d787d7; } #file-body .tok-string, #file-body .tok-string2 { color: var(--green); }
+  #file-body .tok-comment { color: var(--dim); font-style: italic; } #file-body .tok-meta { color: var(--dim); }
+  #file-body .tok-number, #file-body .tok-bool, #file-body .tok-atom, #file-body .tok-literal { color: var(--yellow); }
+  #file-body .tok-typeName, #file-body .tok-className, #file-body .tok-namespace { color: var(--cyan); }
+  #file-body .tok-propertyName { color: #87afd7; } #file-body .tok-definition { color: #ffffff; }
+  #file-body .tok-heading { color: var(--green); font-weight: bold; } #file-body .tok-link, #file-body .tok-url { color: var(--cyan); }
+  #file-body .tok-emphasis { font-style: italic; } #file-body .tok-strong { font-weight: bold; }
+  #file-body .tok-inserted { color: var(--green); } #file-body .tok-deleted, #file-body .tok-invalid { color: var(--red); }
   #toast { position: fixed; left: 8px; right: 8px; bottom: 120px; background: var(--bg); color: var(--fg);
     border: 1px solid var(--green); padding: 6px 8px; z-index: 10; }
 </style>
@@ -139,6 +160,7 @@
   <header id="pane-header">
     <button id="back" aria-label="Back to panes">‹ Panes</button>
     <h1 id="pane-title"></h1>
+    <button id="files-open">files</button>
     <button id="close-pane" class="danger">Close</button>
   </header>
   <div id="term-wrap"><div id="term"></div></div>
@@ -170,12 +192,24 @@
   </div>
 </section>
 
+<section id="files" class="view hidden">
+  <header>
+    <button id="files-back">‹ back</button>
+    <h1 id="files-title"></h1>
+    <button id="file-edit" class="hidden">edit</button>
+  </header>
+  <div id="folder"></div>
+  <div id="file-note" class="hidden"></div>
+  <div id="file-body" class="hidden"></div>
+</section>
+
 <div id="statusline"></div>
 
 <div id="toast" class="hidden"></div>
 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
+<script src="/vendor/codemirror.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const STATUS_LABEL = { needs_you: "needs you", working: "working", idle: "idle" };
@@ -373,10 +407,14 @@ $("edit").addEventListener("click", () => {
 // A new version on the Mac reloads the page, as the Home Screen app has no reload button.
 // Never in the middle of something: a recording, a send, a name being typed, the photo menu.
 // Until then each list poll tries again. The open pane is opened again after the reload.
-const VERSION = document.querySelector('meta[name="version"]').content, PANE_KEY = "tmux-phone.pane";
+const VERSION = document.querySelector('meta[name="version"]').content, PANE_KEY = "tmux-phone.pane", FILES_KEY = "tmux-phone.files";
 function reloadWhenSafe() {
   if (recorder || unsent || $("mic").disabled || $("attach").disabled || renaming || !$("photo-menu").classList.contains("hidden")) return;
-  try { if (current) sessionStorage.setItem(PANE_KEY, current); } catch {}
+  if (file && file.changed) return;
+  try {
+    if (current) sessionStorage.setItem(PANE_KEY, current);
+    if (current && !$("files").classList.contains("hidden")) sessionStorage.setItem(FILES_KEY, JSON.stringify({ folder, file: file && file.path }));
+  } catch {}
   location.reload();
 }
 
@@ -658,6 +696,8 @@ function setFontSize(size) {
   size = Math.min(MAX_FONT, Math.max(MIN_FONT, size));
   if (size === term.options.fontSize) return;
   term.options.fontSize = size;
+  document.body.style.setProperty("--font-size", `${size}px`);  // the file screen's size
+  if (file && file.view) file.view.requestMeasure();
   fit.fit();  // the new columns and rows go to ttyd through onResize, and tmux re-fits the window
   hideBorderRow(hiddenRow);  // one row is now a different height
   try { localStorage.setItem(FONT_KEY, String(size)); } catch {}
@@ -762,6 +802,158 @@ $("pane-header").addEventListener("touchend", (e) => {
   touchX = null;
 });
 
+// The file screen, from [files] in the pane view: a folder, or one file from it. It starts in the pane's folder, or
+// on the file open in the pane's nvim. A file opens read-only, so it scrolls and selects as plain text; [edit] makes
+// it editable, [save] writes it. The save carries the file's mtime from when it was read, and the Mac refuses it
+// if the file changed on disk since.
+let folder = null;  // path of the folder shown, or of the open file's folder
+let file = null;    // the open file: { path, mtime, view, editing, changed }
+const editable = new CM.Compartment();
+const readOnly = [CM.EditorView.editable.of(false), CM.EditorState.readOnly.of(true)];
+
+async function getJSON(path) {
+  const r = await fetch(path);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
+  return data;
+}
+
+function showFiles() {
+  $("pane").classList.add("hidden");
+  $("files").classList.remove("hidden");
+}
+
+$("files-open").addEventListener("click", async () => {
+  let data;
+  try { data = await getJSON(`/api/files?pane=${current}`); } catch (e) { return toast(e.message); }
+  showFiles();
+  if (data.nvim_file) openFile(data.nvim_file, data.nvim_file.replace(/\/[^/]*$/, "") || "/");
+  else showFolder(data);
+});
+
+async function loadFolder(path) {
+  try { showFolder(await getJSON(`/api/files?path=${encodeURIComponent(path)}`)); } catch (e) { toast(e.message); }
+}
+
+// One row per entry under a .. row; a folder's name ends in /.
+function showFolder(data) {
+  closeFile();
+  folder = data.path;
+  $("files-title").textContent = "‎" + folder;  // a left-to-right mark, or the right-to-left cut moves the first / to the end
+  $("files-title").classList.add("path");
+  $("folder").classList.remove("hidden");
+  const row = (path, label, isFolder) =>
+    `<button class="entry${isFolder ? " folder" : ""}" data-path="${esc(path)}" data-folder="${isFolder}">${esc(label)}</button>`;
+  const join = (name) => `${folder === "/" ? "" : folder}/${name}`;
+  $("folder").innerHTML = row(data.parent, "..", true) +
+    data.entries.map((e) => row(join(e.name), e.folder ? `${e.name}/` : e.name, e.folder)).join("");
+  $("folder").scrollTop = 0;
+}
+
+$("folder").addEventListener("click", (e) => {
+  const row = e.target.closest("[data-path]");
+  if (!row) return;
+  if (row.dataset.folder === "true") loadFolder(row.dataset.path);
+  else openFile(row.dataset.path, folder);
+});
+
+// A big, binary or non-UTF-8 file comes back as a one-line note instead of its text.
+async function openFile(path, from) {
+  let data;
+  try { data = await getJSON(`/api/file?path=${encodeURIComponent(path)}`); } catch (e) { return toast(e.message); }
+  closeFile();
+  folder = from;
+  file = { path: data.path, mtime: data.mtime, view: null, editing: false, changed: false };
+  $("folder").classList.add("hidden");
+  $("files-title").classList.remove("path");
+  $("files-title").textContent = data.path.split("/").pop();
+  if (data.note !== undefined) {
+    $("file-note").textContent = data.note;
+    $("file-note").classList.remove("hidden");
+    return;
+  }
+  $("file-body").classList.remove("hidden");
+  file.view = new CM.EditorView({
+    parent: $("file-body"),
+    state: CM.EditorState.create({
+      doc: data.text,
+      extensions: [
+        CM.lineNumbers(), CM.EditorView.lineWrapping, CM.history(),
+        CM.keymap.of([...CM.defaultKeymap, ...CM.historyKeymap, CM.indentWithTab]),
+        CM.syntaxHighlighting(CM.classHighlighter), CM.languageFor(file.path.split("/").pop()),
+        CM.EditorState.lineSeparator.of(data.text.includes("\r\n") ? "\r\n" : "\n"),  // keep a Windows file's line ends
+        editable.of(readOnly),
+        CM.EditorView.updateListener.of((u) => { if (u.docChanged) file.changed = true; }),
+      ],
+    }),
+  });
+  setEditing(false);
+}
+
+function closeFile() {
+  if (file && file.view) file.view.destroy();
+  file = null;
+  $("file-body").classList.add("hidden");
+  $("file-note").classList.add("hidden");
+  $("file-edit").classList.add("hidden");
+}
+
+function setEditing(on) {
+  file.editing = on;
+  file.view.dispatch({ effects: editable.reconfigure(on ? [] : readOnly) });
+  $("file-edit").textContent = on ? "save" : "edit";
+  $("file-edit").classList.toggle("primary", on);
+  $("file-edit").classList.remove("hidden");
+}
+
+// [edit] puts the cursor on the top line on screen, so the view stays where it is, and focuses it inside the tap,
+// so iOS brings up the keyboard. [save] writes the file and goes back to read-only; if the save fails, the
+// changes stay on screen.
+$("file-edit").addEventListener("click", async () => {
+  const saving = file, view = file.view;
+  if (!file.editing) {
+    setEditing(true);
+    view.dispatch({ selection: { anchor: view.lineBlockAtHeight(view.scrollDOM.scrollTop).from } });
+    view.focus();
+    return;
+  }
+  $("file-edit").disabled = true;
+  try {
+    const r = await post("/api/file", { path: saving.path, text: view.state.doc.toString(), mtime: saving.mtime });
+    saving.mtime = r.mtime;
+    saving.changed = false;
+    if (file === saving) { view.contentDOM.blur(); setEditing(false); }
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    $("file-edit").disabled = false;
+  }
+});
+
+// [‹ back] goes from a file to its folder, and from the folder to the pane. Unsaved changes ask first.
+$("files-back").addEventListener("click", () => {
+  if (!file) {
+    $("files").classList.add("hidden");
+    $("pane").classList.remove("hidden");
+    hideBorderRow(hiddenRow);  // the font size may have changed on the file screen
+    return;
+  }
+  if (file.changed && !confirm(`Leave ${file.path.split("/").pop()} without saving? Your changes are lost.`)) return;
+  loadFolder(folder);
+});
+
+// Pinch on the file sets the font size, the same one the terminal uses. One finger scrolls the file as usual.
+let filePinch = null;
+$("file-body").addEventListener("touchstart", (e) => {
+  filePinch = e.touches.length === 2 ? { gap: fingerGap(e.touches), size: term.options.fontSize } : null;
+}, { passive: true });
+$("file-body").addEventListener("touchmove", (e) => {
+  if (!filePinch || e.touches.length !== 2) return;
+  e.preventDefault();
+  setFontSize(Math.round(filePinch.size * fingerGap(e.touches) / filePinch.gap));
+}, { passive: false });
+$("file-body").addEventListener("touchend", (e) => { if (e.touches.length < 2) filePinch = null; }, { passive: true });
+
 // iOS drops the connection while the app is in the background; reconnect at once on return.
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && socket && socket.readyState !== WebSocket.OPEN) connect();
@@ -770,9 +962,21 @@ document.addEventListener("visibilitychange", () => {
 // The poll also runs in the pane view, to see a new version.
 setInterval(() => { if (!document.hidden) loadPanes(true); }, 3000);
 loadPanes();
-let reopen = null;
-try { reopen = sessionStorage.getItem(PANE_KEY); sessionStorage.removeItem(PANE_KEY); } catch {}
-if (reopen) openPane(reopen);
+document.body.style.setProperty("--font-size", `${term.options.fontSize}px`);
+let reopen = null, reopenFiles = null;
+try {
+  reopen = sessionStorage.getItem(PANE_KEY);
+  reopenFiles = JSON.parse(sessionStorage.getItem(FILES_KEY));
+  sessionStorage.removeItem(PANE_KEY);
+  sessionStorage.removeItem(FILES_KEY);
+} catch {}
+// After a reload, the pane opens again, then the folder or file that was on the file screen.
+if (reopen) openPane(reopen).then(() => {
+  if (!reopenFiles || current !== reopen) return;
+  showFiles();
+  if (reopenFiles.file) openFile(reopenFiles.file, reopenFiles.folder);
+  else loadFolder(reopenFiles.folder);
+});
 </script>
 </body>
 </html>

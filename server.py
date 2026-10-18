@@ -2,6 +2,7 @@
 """Phone UI for the tmux session on this Mac, served on the tailnet via `tailscale serve`."""
 import base64
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ from http.client import HTTPConnection
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 HOST, PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_PORT", "8766"))
 # Set by install.sh in the launchd job: this Mac's tailnet URL, and the one Tailscale login allowed in.
@@ -30,9 +32,10 @@ INDEX = STATIC / "index.html"
 SERVER_SOURCE = Path(__file__).read_bytes()  # a change to this file needs a restart, so reading it once is enough
 # The terminal library, web app manifest and icons the page loads; only these paths are served.
 STATIC_FILES = {"/vendor/xterm.js": "text/javascript; charset=utf-8", "/vendor/xterm.css": "text/css; charset=utf-8",
-                "/vendor/addon-fit.js": "text/javascript; charset=utf-8",
+                "/vendor/addon-fit.js": "text/javascript; charset=utf-8", "/vendor/codemirror.js": "text/javascript; charset=utf-8",
                 "/manifest.json": "application/manifest+json", "/icon-180.png": "image/png", "/icon-512.png": "image/png"}
 MAX_BODY = 64 * 1024
+MAX_FILE = 2 * 1024 * 1024  # bigger files are not shown on the phone
 MAX_AUDIO = 25 * 1024 * 1024
 MAX_IMAGES = 20 * 1024 * 1024  # all images in one paste, before base64
 UPLOADS = STATE / "uploads"
@@ -324,6 +327,98 @@ def unzoom(pane):
         tmux("resize-pane", "-Z", "-t", pane)
 
 
+# The file screen: folders and text files on the Mac, read and written as UTF-8.
+def pane_folder(pane):
+    return pane_info(pane, "pane_current_path")[0]
+
+
+def full_path(path, pane):
+    """An absolute path. ~ is the home folder; a relative path, or none, starts at the pane's folder."""
+    path = os.path.expanduser(path or "")
+    if not os.path.isabs(path):
+        path = os.path.join(pane_folder(pane) if pane else str(Path.home()), path)
+    return os.path.normpath(path)
+
+
+def list_folder(path):
+    """Folders first, then the rest, each sorted by name. Hidden files are listed too."""
+    with os.scandir(path) as it:
+        entries = [{"name": e.name, "folder": e.is_dir()} for e in it]
+    entries.sort(key=lambda e: (not e["folder"], e["name"].lower(), e["name"]))
+    return {"path": path, "parent": os.path.dirname(path), "entries": entries}
+
+
+def read_file(path):
+    """The file's text and its mtime, or a one-line note instead of text for a big, binary or non-UTF-8 file.
+    The mtime is a string: nanoseconds don't fit in a JavaScript number."""
+    st = os.stat(path)
+    out = {"path": path, "mtime": str(st.st_mtime_ns)}
+    if st.st_size > MAX_FILE:
+        return {**out, "note": f"too big to show: {st.st_size / 1024 / 1024:.1f} MB"}
+    data = Path(path).read_bytes()
+    if b"\0" in data[:8192]:
+        return {**out, "note": "binary file, not shown"}
+    try:
+        return {**out, "text": data.decode("utf-8")}
+    except UnicodeDecodeError as e:
+        return {**out, "note": f"not UTF-8, not shown: {e}"}
+
+
+def write_file(path, text, mtime):
+    """Write the file, unless it changed on disk since the phone read it. Returns the new mtime, or None if it changed."""
+    if str(os.stat(path).st_mtime_ns) != mtime:
+        return None
+    Path(path).write_bytes(text.encode("utf-8"))
+    reload_in_nvim(path)
+    return str(os.stat(path).st_mtime_ns)
+
+
+# nvim 0.9+ opens a server socket by itself at $TMPDIR/nvim.$USER/<random>/nvim.<pid>.0. In a terminal, nvim is two
+# processes: the screen one on the tty, and its child that holds the file and the socket.
+def nvim_sockets(pids=None):
+    found = glob.glob(os.path.join(os.environ.get("TMPDIR", "/tmp"), "nvim.*", "*", "nvim.*.0"))
+    return [s for s in found if pids is None or s.split(".")[-2] in pids]
+
+
+def nvim(socket_path, expr):
+    """Ask a running nvim for the value of a Vim expression."""
+    r = subprocess.run(["nvim", "--server", socket_path, "--remote-expr", expr], capture_output=True, text=True, timeout=3)
+    return r.stdout if r.returncode == 0 else None
+
+
+def nvim_file(pane):
+    """The file open in the nvim that is the pane's foreground process, or None."""
+    tty = pane_info(pane, "pane_tty")[0].removeprefix("/dev/")
+    rows = [line.split(None, 4) for line in
+            subprocess.run(["ps", "-A", "-o", "pid=,ppid=,tty=,stat=,comm="], capture_output=True, text=True,
+                           env={"LC_ALL": "C"}).stdout.splitlines()]
+    rows = [r for r in rows if len(r) == 5]
+    front = {r[0] for r in rows if r[2] == tty and "+" in r[3] and os.path.basename(r[4]) == "nvim"}
+    if not front:
+        return None
+    pids = front | {r[0] for r in rows if r[1] in front}
+    for s in nvim_sockets(pids):
+        try:
+            path = nvim(s, 'expand("%:p")')
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def reload_in_nvim(path):
+    """After a save from the phone, every nvim with that file open reloads it (:checktime). It runs on a timer
+    inside nvim, so a question nvim asks there (the buffer has its own changes too) can't hold up the save."""
+    name = path.replace("'", "''")
+    expr = f"timer_start(0, {{-> execute(map(filter(getbufinfo(), {{_, b -> b.name ==# '{name}'}}), {{_, b -> 'checktime ' .. b.bufnr}}))}})"
+    for s in nvim_sockets():
+        try:
+            nvim(s, expr)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
 class Handler(BaseHTTPRequestHandler):
     def reply(self, status_code, body, content_type="application/json"):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -363,11 +458,22 @@ class Handler(BaseHTTPRequestHandler):
                 panes = list_panes()
                 return self.reply(200, {"panes": panes, "sessions": sessions_for_phone(target),
                                         "version": version(INDEX.read_bytes())})
+            url = urlsplit(self.path)
+            if url.path in ("/api/files", "/api/file"):
+                query = {k: v[0] for k, v in parse_qs(url.query).items()}
+                pane = f"%{query['pane']}" if query.get("pane", "").isdigit() else None
+                if url.path == "/api/file":
+                    return self.reply(200, read_file(full_path(query.get("path"), pane)))
+                # With no path, the pane's folder, and the file open in the pane's nvim if there is one.
+                folder = list_folder(full_path(query.get("path"), pane))
+                return self.reply(200, folder if query.get("path") else {**folder, "nvim_file": pane and nvim_file(pane)})
             self.reply(404, {"error": "not found"})
         except TmuxError as e:
             self.reply(502, {"error": str(e)})
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except OSError as e:
+            self.reply(400, {"error": str(e)})
         except Exception:
             traceback.print_exc()
             self.reply(500, {"error": "server error"})
@@ -386,10 +492,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(502, {"error": f"transcription failed: {e}"})
         if not self.allowed(needs_origin=True) or content_type != "application/json":
             return self.reply(403, {"error": "forbidden"})
-        if length > (MAX_IMAGES * 4 // 3 + MAX_BODY if self.path.endswith("/paste") else MAX_BODY):
+        limit = MAX_IMAGES * 4 // 3 + MAX_BODY if self.path.endswith("/paste") else MAX_BODY
+        if self.path == "/api/file":
+            limit = 2 * MAX_FILE + MAX_BODY  # JSON escapes can make the text longer
+        if length > limit:
             return self.reply(413, {"error": "too large"})
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
+            if self.path == "/api/file":
+                path, text, mtime = body.get("path"), body.get("text"), body.get("mtime")
+                if not all(isinstance(v, str) for v in (path, text, mtime)) or not os.path.isabs(path):
+                    return self.reply(400, {"error": "bad save"})
+                new_mtime = write_file(path, text, mtime)
+                if new_mtime is None:
+                    return self.reply(409, {"error": "Not saved: the file changed on disk after you opened it. Go back and open it again."})
+                return self.reply(200, {"mtime": new_mtime})
             if self.path == "/api/windows":
                 ensure_viewer()  # the new window joins the group, so the Mac has it too
                 return self.reply(200, {"pane": tmux("new-window", "-t", f"={VIEWER}:", "-P", "-F", "#{pane_id}").strip().lstrip("%")})
@@ -461,6 +578,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(502, {"error": str(e)})
         except ValueError:
             self.reply(400, {"error": "bad json"})
+        except OSError as e:
+            self.reply(400, {"error": str(e)})
         except Exception:
             traceback.print_exc()
             self.reply(500, {"error": "server error"})
