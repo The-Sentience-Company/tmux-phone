@@ -389,15 +389,40 @@ async function main() {
       await expectPastedPath(() => page.setInputFiles("#file", { name: "dot.png", mimeType: "image/png", buffer: Buffer.from(PNG_B64, "base64") }));
     });
 
-    await check("[photo] then [paste] pastes the clipboard image's saved path without pressing Enter", async () => {
-      await page.tap("#attach");
-      assert(await page.locator("#paste-photo").isVisible() && await page.locator("#library").isVisible(), "the photo menu did not open");
-      await expectPastedPath(() => page.tap("#paste-photo"));
-      assert(!(await page.locator("#photo-menu").isVisible()), "the photo menu is still open");
-      await page.tap("#attach");
-      await page.tap('[data-key="1"]');  // a tap elsewhere closes it
-      assert(!(await page.locator("#photo-menu").isVisible()), "a tap outside did not close the menu");
-      tmux("send-keys", "-t", pane, "C-u");
+    await check("[photo] opens the file picker straight away, and the picked image's path is pasted", async () => {
+      await expectPastedPath(async () => {
+        const [chooser] = await Promise.all([page.waitForEvent("filechooser", { timeout: 3000 }), page.tap("#attach")]);
+        await chooser.setFiles({ name: "dot.png", mimeType: "image/png", buffer: Buffer.from(PNG_B64, "base64") });
+      });
+    });
+
+    await check("[paste] pastes the clipboard image's saved path without pressing Enter", async () => {
+      await expectPastedPath(() => page.tap("#paste"));
+    });
+
+    await check("[paste] pastes multi-line clipboard text as one paste, with nothing submitted", async () => {
+      // zsh takes a bracketed paste into its line editor and runs nothing until Enter; sh would run each line.
+      const text = "echo PASTED_ONE\necho PASTED_TWO";
+      await page.evaluate((t) => {
+        navigator.clipboard.read = async () => [new ClipboardItem({ "text/plain": new Blob([t], { type: "text/plain" }) })];
+      }, text);
+      const shell = paneInfo(pane, "pane_current_command");
+      tmux("send-keys", "-t", pane, "clear; zsh -f", "Enter");
+      await waitFor(() => paneInfo(pane, "pane_current_command") === "zsh", 5000, "zsh to start");
+      tmux("send-keys", "-t", pane, "clear", "Enter");
+      await waitFor(() => tmux("capture-pane", "-p", "-t", pane).trim() === PROMPT.trim(), 5000, "a clear zsh prompt");
+      await page.tap("#paste");
+      const want = `${PROMPT}${text}`;
+      await waitFor(() => tmux("capture-pane", "-p", "-t", pane).trimEnd() === want, 5000, "the pasted text in the pane");
+      await sleep(1000);  // give a stray Enter time to run a line
+      const now = tmux("capture-pane", "-p", "-t", pane).trimEnd();
+      assert(now === want, `expected only the unsubmitted paste, pane shows:\n${now}`);
+      assert((await page.locator("#paste").textContent()) === "paste", "[paste] still shows the dots");
+      tmux("send-keys", "-t", pane, "C-c");
+      await waitFor(() => tmux("capture-pane", "-p", "-t", pane).trimEnd().endsWith(`\n${PROMPT.trim()}`), 5000, "a fresh zsh prompt");
+      tmux("send-keys", "-t", pane, "exit", "Enter");
+      await waitFor(() => paneInfo(pane, "pane_current_command") === shell, 5000,
+                    `zsh to exit, pane shows:\n${tmux("capture-pane", "-p", "-t", pane)}`);
     });
 
     await check("the pane view has no message box and no Send button", async () => {
