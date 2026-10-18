@@ -46,7 +46,7 @@ MAX_NAME = 100
 KEYS = {"enter": "Enter", "escape": "Escape", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
         "tab": "Tab", "shift+tab": "BTab", "ctrl+c": "C-c", "alt+p": "M-p", "1": "1", "2": "2", "3": "3"}
 PANE_FIELDS = ["pane_id", "window_id", "window_index", "window_name", "pane_index", "pane_title", "pane_tty", "pane_active",
-               "window_active", "window_zoomed_flag", "window_panes", "pane_current_command"]
+               "window_active", "window_zoomed_flag", "window_panes", "pane_current_command", "mouse_any_flag"]
 
 # Claude Code draws its conversation, a rule, the ❯ input line, then a footer.
 RULE = re.compile(r"^\s*─{8,}")
@@ -147,6 +147,8 @@ def list_panes():
             "title": p["pane_title"],
             "command": p["pane_current_command"],
             "active": p["pane_active"] == "1" and p["window_active"] == "1",
+            # The app reads the mouse, so tmux hands it the wheel; if not, the wheel scrolls tmux's copy mode.
+            "reads_mouse": p["mouse_any_flag"] == "1",
             "status": status(lines) if is_claude else None,
             "last_line": last_line(lines) if is_claude else next((l.strip() for l in reversed(lines) if l.strip()), ""),
         })

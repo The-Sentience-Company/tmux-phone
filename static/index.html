@@ -86,6 +86,10 @@
   #photo-menu { position: absolute; bottom: 100%; left: 0; display: flex; gap: 6px; padding: 0 4px; background: var(--bg);
     border: 1px solid var(--line); border-left: 0; border-bottom: 0; z-index: 6; }
   #photo-menu button { min-height: 44px; padding: 0 7px; color: var(--cyan); }
+  /* [↓ bottom] sits at the bottom right of the terminal while the pane is scrolled back. */
+  #to-bottom { position: absolute; bottom: 100%; right: 0; min-height: 44px; padding: 0 7px; background: var(--bg);
+    border: 1px solid var(--line); border-right: 0; border-bottom: 0; z-index: 6; }
+  #to-bottom::before { content: "["; color: var(--dim); } #to-bottom::after { content: "]"; color: var(--dim); }
   #mic.recording { background: var(--red); color: var(--bg); }
   #mic.recording::before, #mic.recording::after { color: inherit; }
   .icon { width: 20px; height: 20px; vertical-align: middle; fill: none; stroke: currentColor; stroke-width: 2; }
@@ -118,6 +122,7 @@
   <div id="term-wrap"><div id="term"></div></div>
   <div id="keys">
   <div id="photo-menu" class="hidden"><button id="paste-photo">paste</button><button id="library">library</button></div>
+  <button id="to-bottom" class="hidden">↓ bottom</button>
   <div class="bar">
     <button id="mic" class="input" aria-label="Mic"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg></button>
     <button id="attach" class="input" aria-label="Photo"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h4l2-3h6l2 3h4v11H3z"/><circle cx="12" cy="13" r="3.5"/></svg></button>
@@ -327,6 +332,7 @@ function reloadWhenSafe() {
 async function openPane(id) {
   if (!(await act(`/api/panes/${id}/open`))) return;
   current = id;
+  atBottom();
   $("pane-title").textContent = lastTitle[id] || "";
   $("list").classList.add("hidden");
   $("pane").classList.remove("hidden");
@@ -357,6 +363,7 @@ $("close-pane").addEventListener("click", async () => {
 
 document.querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click", () => {
   disarm();
+  atBottom();
   act(`/api/panes/${current}/key`, { key: b.dataset.key });
 }));
 
@@ -420,7 +427,7 @@ async function sendPhotos(blobs) {
   $("attach").disabled = true;
   $("attach").innerHTML = DOTS;
   for (const f of blobs) await photoBase64(f).then((b) => images.push(b), (e) => toast(`Couldn't read ${f.name || "image"}: ${e.message}`));
-  if (images.length && pane === current) await act(`/api/panes/${pane}/paste`, { images });
+  if (images.length && pane === current && await act(`/api/panes/${pane}/paste`, { images })) atBottom();
   $("attach").disabled = false;
   $("attach").innerHTML = PHOTO_ICON;
 }
@@ -483,7 +490,7 @@ async function sendAudio(audio) {
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
     if (pane !== current) return;  // left that pane while it was transcribing
-    if (data.text) await post(`/api/panes/${pane}/paste`, { text: data.text });
+    if (data.text) { await post(`/api/panes/${pane}/paste`, { text: data.text }); atBottom(); }
     unsent = null;
     setMic(MIC_ICON);
     if (!data.text) toast("Didn't catch anything.");
@@ -544,7 +551,11 @@ let socket = null, retryMs = 1000, retryTimer = null;
 function startTerminal() {
   term.open($("term"));
   fit.fit();
-  term.onData((data) => { if (socket.readyState === WebSocket.OPEN) socket.send(encoder.encode("0" + withMods(data))); });
+  term.onData((data) => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    atBottom();
+    socket.send(encoder.encode("0" + withMods(data)));
+  });
   term.onResize(({ cols, rows }) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(encoder.encode("1" + JSON.stringify({ columns: cols, rows })));
   });
@@ -585,8 +596,11 @@ function connect() {
 // A vertical swipe sends mouse wheel input to tmux instead, as the Mac's wheel does: tmux hands it to the app
 // if the app reads the mouse (Claude Code scrolls its own chat), and scrolls the pane's history if not.
 // This needs `mouse on` in tmux, which also makes tmux ask for SGR mouse codes. A tap opens the keyboard.
-const LINE_PX = 16, MAX_WHEEL = 10;
+// The text follows the finger: one wheel event per (row height x lines one event scrolls) of finger movement.
+// tmux's copy mode scrolls 5 lines per event (its WheelUpPane binding); Claude Code scrolls 1 (measured).
+const APP_LINES = 1, COPY_LINES = 5, MAX_WHEEL = 10;
 let scrollY = null, scrollPx = 0, swiped = false;
+let wheelUps = 0;  // net wheel-up events since the pane was last at the bottom; [↓ bottom] shows while above 0
 let pinch = null;  // finger distance and font size when a two-finger pinch began
 const fingerGap = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
 
@@ -598,8 +612,21 @@ function setFontSize(size) {
   try { localStorage.setItem(FONT_KEY, String(size)); } catch {}
 }
 
+function atBottom() {
+  wheelUps = 0;
+  $("to-bottom").classList.add("hidden");
+}
+
+function wheelPx() {
+  const rowPx = term.element.querySelector(".xterm-screen").getBoundingClientRect().height / term.rows;
+  const p = panes.find((p) => p.id === current);
+  return rowPx * (p && p.reads_mouse ? APP_LINES : COPY_LINES);
+}
+
 function sendWheel(up, count, x, y) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  wheelUps = Math.max(0, wheelUps + (up ? count : -count));
+  $("to-bottom").classList.toggle("hidden", !wheelUps);
   const box = term.element.querySelector(".xterm-screen").getBoundingClientRect();
   const col = Math.min(term.cols, Math.max(1, Math.floor((x - box.left) / (box.width / term.cols)) + 1));
   const row = Math.min(term.rows, Math.max(1, Math.floor((y - box.top) / (box.height / term.rows)) + 1));
@@ -632,11 +659,11 @@ $("term-wrap").addEventListener("touchmove", (e) => {
   const { clientX: x, clientY: y } = e.touches[0];
   scrollPx += y - scrollY;  // finger moving down shows older lines, like wheel up
   scrollY = y;
-  const lines = Math.trunc(scrollPx / LINE_PX);
-  if (!lines) return;
+  const step = wheelPx(), events = Math.trunc(scrollPx / step);
+  if (!events) return;
   swiped = true;
-  scrollPx -= lines * LINE_PX;
-  sendWheel(lines > 0, Math.min(Math.abs(lines), MAX_WHEEL), x, y);
+  scrollPx -= events * step;
+  sendWheel(events > 0, Math.min(Math.abs(events), MAX_WHEEL), x, y);
 }, { passive: false, capture: true });
 $("term-wrap").addEventListener("touchend", (e) => {
   if (e.touches.length) return;  // a finger is still down
@@ -644,6 +671,19 @@ $("term-wrap").addEventListener("touchend", (e) => {
   scrollY = null;
   if (!swiped) term.focus();  // inside the touch, so iOS opens the keyboard
 }, { passive: true, capture: true });
+
+// [↓ bottom] sends wheel-down in chunks of 10, 20 more than were sent up, in case the count is off.
+// In copy mode tmux leaves it at the bottom; Claude Code ignores the extra.
+$("to-bottom").addEventListener("click", async () => {
+  const box = term.element.querySelector(".xterm-screen").getBoundingClientRect();
+  let left = wheelUps + 20;
+  atBottom();
+  while (left > 0) {
+    sendWheel(false, Math.min(left, 10), box.left + box.width / 2, box.top + box.height / 2);
+    left -= 10;
+    await new Promise((r) => setTimeout(r, 30));
+  }
+});
 
 // Only the terminal zooms: stop iOS from zooming the whole page on a pinch.
 for (const type of ["gesturestart", "gesturechange", "gestureend"]) document.addEventListener(type, (e) => e.preventDefault());
