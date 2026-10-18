@@ -87,6 +87,8 @@
   .acts { display: flex; flex-shrink: 0; gap: 4px; margin-left: auto; }
   .acts button, .add-window, .add-session { min-height: 36px; padding: 0 2px; }
   .add-window { margin: 10px 4px 0; }
+  /* A pane's buttons reach past its title line to be easy to tap, without making the line taller, so the tree glyph stays level. */
+  .pane .acts button { min-height: 0; padding: 8px 2px; margin: -8px 0; }
   .rename { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--green);
     border-radius: 0; padding: 0 4px; outline: none; }
 
