@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import uuid
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,11 +37,13 @@ IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg", b"GIF87a": "
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 WHISPER_HOST, WHISPER_PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_WHISPER_PORT", "8767"))
 
-PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|paste|key|close)$")
+PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|paste|key|close|rename)$")
+WINDOW_ROUTE = re.compile(r"^/api/windows/(\d+)/(rename|panes)$")  # by window id: 3 is tmux's @3
+MAX_NAME = 100
 # Phone button name -> tmux send-keys name. Digits answer Claude's numbered menus.
 KEYS = {"enter": "Enter", "escape": "Escape", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
         "tab": "Tab", "shift+tab": "BTab", "ctrl+c": "C-c", "alt+p": "M-p", "1": "1", "2": "2", "3": "3"}
-PANE_FIELDS = ["pane_id", "window_index", "window_name", "pane_index", "pane_title", "pane_tty", "pane_active",
+PANE_FIELDS = ["pane_id", "window_id", "window_index", "window_name", "pane_index", "pane_title", "pane_tty", "pane_active",
                "window_active", "window_zoomed_flag", "window_panes", "pane_current_command"]
 
 # Claude Code draws its conversation, a rule, the ❯ input line, then a footer.
@@ -118,6 +121,7 @@ def list_panes():
         panes.append({
             "id": p["pane_id"].lstrip("%"),
             "window": int(p["window_index"]),
+            "window_id": p["window_id"].lstrip("@"),
             "window_name": p["window_name"],
             "title": p["pane_title"],
             "command": p["pane_current_command"],
@@ -179,6 +183,23 @@ def leave_scroll(pane):
     """Typing into a pane that is scrolled back would land in tmux's copy mode, so leave it first."""
     if pane_info(pane, "pane_in_mode") == ["1"]:
         tmux("copy-mode", "-q", "-t", pane)
+
+
+def valid_name(name):
+    return (isinstance(name, str) and name.strip() != "" and len(name) <= MAX_NAME
+            and not any(unicodedata.category(c) == "Cc" for c in name))
+
+
+def tmux_literal(name):
+    """tmux reads #{...} in a new name as a format; ## is a plain #."""
+    return name.replace("#", "##")
+
+
+def add_pane(window):
+    """Split the window and return the new pane's id. Side by side if the window is wide, else one above the other."""
+    width, height = (int(n) for n in tmux("display-message", "-p", "-t", window, "#{window_width} #{window_height}").split())
+    side = "-h" if width > 2.5 * height else "-v"
+    return tmux("split-window", side, "-t", window, "-P", "-F", "#{pane_id}").strip().lstrip("%")
 
 
 def unzoom(pane):
@@ -250,6 +271,16 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/api/windows":
                 return self.reply(200, {"pane": tmux("new-window", "-P", "-F", "#{pane_id}").strip().lstrip("%")})
+            m = WINDOW_ROUTE.match(self.path)
+            if m:
+                window, action = f"@{m[1]}", m[2]
+                if action == "panes":
+                    return self.reply(200, {"pane": add_pane(window)})
+                if not valid_name(body.get("name")):
+                    return self.reply(400, {"error": "bad name"})
+                # Naming a window also turns off tmux's automatic-rename for it, so the name sticks.
+                tmux("rename-window", "-t", window, "--", tmux_literal(body["name"]))
+                return self.reply(200, {"ok": True})
             m = PANE_ROUTE.match(self.path)
             if not m:
                 return self.reply(404, {"error": "not found"})
@@ -288,6 +319,10 @@ class Handler(BaseHTTPRequestHandler):
                 tmux("send-keys", "-t", pane, key)
             elif action == "close":
                 tmux("kill-pane", "-t", pane)
+            elif action == "rename":
+                if not valid_name(body.get("name")):
+                    return self.reply(400, {"error": "bad name"})
+                tmux("select-pane", "-t", pane, "-T", tmux_literal(body["name"]))
             self.reply(200, {"ok": True})
         except TmuxError as e:
             self.reply(502, {"error": str(e)})

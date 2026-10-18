@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="tmux">
@@ -27,8 +27,8 @@
   /* Header buttons read as [Label]. Pressed or armed shows in reverse video. */
   button { font: inherit; color: var(--fg); background: none; border: 0; border-radius: 0; padding: 0 6px;
     min-height: 40px; cursor: pointer; }
-  header button::before { content: "["; color: var(--dim); }
-  header button::after { content: "]"; color: var(--dim); }
+  header button::before, .br::before { content: "["; color: var(--dim); }
+  header button::after, .br::after { content: "]"; color: var(--dim); }
   button:active, button.armed { background: var(--fg); color: var(--bg); }
   button:active::before, button:active::after, button.armed::before, button.armed::after { color: inherit; }
   button:disabled { color: var(--dim); }
@@ -53,8 +53,17 @@
   .chip.needs_you { color: var(--red); font-weight: bold; } .chip.working { color: var(--green); } .chip.idle { color: var(--dim); }
   .pane:active .chip { color: inherit; }
   #list-error { color: var(--red); padding: 8px; }
+  /* Edit mode: [rn] [+pane] [x] at the end of each row, and a [+window] row at the bottom. */
+  .window-name, .pane .top { display: flex; align-items: center; gap: 8px; }
+  .window-name { gap: 0; } .window-name .name { margin-left: 1ch; }
+  .window-name .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acts { display: flex; flex-shrink: 0; }
+  .acts button { min-height: 32px; padding: 0 4px; }
+  .add-window { margin: 12px 4px 0; }
+  .rename { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--green);
+    border-radius: 0; padding: 0 4px; outline: none; }
 
-  #term-wrap { flex: 1; min-height: 0; background: #000; position: relative; }
+  #term-wrap { flex: 1; min-height: 0; background: #000; position: relative; touch-action: none; }
   #term { width: 100%; height: 100%; }
   #term-status { position: absolute; top: 0; right: 0; color: var(--yellow); background: #000; padding: 0 6px;
     pointer-events: none; z-index: 5; }
@@ -68,6 +77,13 @@
   .bar button:active, .bar button.armed { background: var(--fg); color: var(--bg); }
   .bar .sep { flex-shrink: 0; color: var(--line); padding: 0 1px; user-select: none; -webkit-user-select: none; }
   #mic.recording { background: var(--red); color: var(--bg); }
+  .icon { width: 20px; height: 20px; vertical-align: middle; fill: none; stroke: currentColor; stroke-width: 2; }
+  /* Three dots bouncing in turn while a recording or photo is being sent. */
+  .dots { color: var(--cyan); }
+  .dots i { display: inline-block; width: 4px; height: 4px; margin: 0 1px; background: currentColor;
+    animation: bounce 0.9s infinite ease-in-out; }
+  .dots i:nth-child(2) { animation-delay: 0.15s; } .dots i:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
   #toast { position: fixed; left: 8px; right: 8px; bottom: 120px; background: var(--bg); color: var(--fg);
     border: 1px solid var(--green); padding: 6px 8px; z-index: 10; }
 </style>
@@ -77,7 +93,7 @@
 <section id="list" class="view">
   <header>
     <h1>tmux</h1>
-    <button id="new-window" class="primary">New window</button>
+    <button id="edit">edit</button>
   </header>
   <div id="list-body"></div>
 </section>
@@ -90,15 +106,15 @@
   </header>
   <div id="term-wrap"><div id="term"></div><div id="term-status" class="hidden">[reconnecting…]</div></div>
   <div class="bar">
-    <button id="mic" class="input" aria-label="Mic">●</button>
-    <button id="attach" class="input" aria-label="Photo">▣</button>
+    <button id="mic" class="input" aria-label="Mic"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg></button>
+    <button id="attach" class="input" aria-label="Photo"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h4l2-3h6l2 3h4v11H3z"/><circle cx="12" cy="13" r="3.5"/></svg></button>
     <input type="file" id="file" accept="image/*" multiple hidden>
-    <button data-key="enter" class="primary" aria-label="Enter">⏎</button>
+    <button data-key="enter" class="primary">enter</button>
     <span class="sep" aria-hidden="true">│</span>
-    <button data-mod="ctrl" class="mod" aria-label="Ctrl">^</button>
-    <button data-mod="alt" class="mod" aria-label="Alt">⌥</button>
+    <button data-mod="ctrl" class="mod">ctrl</button>
+    <button data-mod="alt" class="mod">alt</button>
     <span class="sep" aria-hidden="true">│</span>
-    <button data-key="escape" aria-label="Esc">esc</button>
+    <button data-key="escape">esc</button>
     <button data-key="up">↑</button>
     <button data-key="down">↓</button>
     <button data-key="left">←</button>
@@ -106,10 +122,10 @@
     <button data-key="1">1</button>
     <button data-key="2">2</button>
     <button data-key="3">3</button>
-    <button data-key="tab" aria-label="Tab">⇥</button>
-    <button data-key="shift+tab" aria-label="Shift-Tab">⇧⇥</button>
-    <button data-key="ctrl+c" class="danger" aria-label="Ctrl-C">^C</button>
-    <button data-key="alt+p" aria-label="Model">model</button>
+    <button data-key="tab">tab</button>
+    <button data-key="shift+tab">shift-tab</button>
+    <button data-key="ctrl+c" class="danger">ctrl-c</button>
+    <button data-key="alt+p">model</button>
   </div>
 </section>
 
@@ -122,6 +138,7 @@ const $ = (id) => document.getElementById(id);
 const STATUS_LABEL = { needs_you: "needs you", working: "working", idle: "idle" };
 let current = null;  // id of the pane open on the phone
 let lastTitle = {};
+let panes = [], editMode = false, renaming = false;  // the list skips its refresh while a name is being typed
 
 function setViewportHeight() {
   // iOS keeps the layout height when the keyboard opens; size the page to what is actually visible.
@@ -159,40 +176,106 @@ function esc(s) {
 }
 
 async function loadPanes() {
-  let panes;
+  if (renaming) return;
+  let fresh;
   try {
     const r = await fetch("/api/panes");
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `Request failed (${r.status})`);
-    panes = (await r.json()).panes;
+    fresh = (await r.json()).panes;
   } catch (e) {
-    $("list-body").innerHTML = `<div id="list-error">Couldn't load panes: ${esc(e.message)}</div>`;
+    if (!renaming) $("list-body").innerHTML = `<div id="list-error">Couldn't load panes: ${esc(e.message)}</div>`;
     return;
   }
+  panes = fresh;
+  for (const p of panes) lastTitle[p.id] = p.title || p.command;
+  if (!renaming) renderPanes();
+}
+
+// In edit mode a pane row is not a button, so a tap on it opens nothing.
+function renderPanes() {
   const windows = new Map();
   for (const p of panes) {
-    if (!windows.has(p.window)) windows.set(p.window, { name: p.window_name, panes: [] });
+    if (!windows.has(p.window)) windows.set(p.window, { id: p.window_id, name: p.window_name, panes: [] });
     windows.get(p.window).panes.push(p);
-    lastTitle[p.id] = p.title || p.command;
   }
+  const addWindow = editMode ? `<button class="br primary add-window" data-act="new-window">+window</button>` : "";
   if (!panes.length) {
-    $("list-body").innerHTML = `<div class="window-name">No tmux panes. Tap New window to start one.</div>`;
+    $("list-body").innerHTML = `<div class="window-name">No tmux panes. Tap [edit], then [+window].</div>${addWindow}`;
     return;
   }
+  const chip = (p) => p.status ? `<span class="chip ${p.status}">${STATUS_LABEL[p.status]}</span>` : "";
   $("list-body").innerHTML = [...windows].map(([index, w]) => `
-    <div class="window-name">${index}: ${esc(w.name)}</div>
-    ${w.panes.map((p) => `
+    <div class="window-name">
+      <span>${index}:</span><span class="name rn-target">${esc(w.name)}</span>
+      ${editMode ? `<span class="acts"><button class="br" data-act="rename-window" data-id="${w.id}">rn</button><button class="br primary" data-act="add-pane" data-id="${w.id}">+pane</button></span>` : ""}
+    </div>
+    ${w.panes.map((p) => editMode ? `
+      <div class="pane">
+        <div class="top">
+          <span class="title rn-target">${esc(p.title || p.command)}</span>
+          ${chip(p)}
+          <span class="acts"><button class="br" data-act="rename-pane" data-id="${p.id}">rn</button><button class="br danger" data-act="close-pane" data-id="${p.id}">x</button></span>
+        </div>
+        <div class="line">${esc(p.last_line || " ")}</div>
+      </div>` : `
       <button class="pane" data-pane="${p.id}">
         <div class="top">
           <span class="title">${esc(p.title || p.command)}</span>
-          ${p.status ? `<span class="chip ${p.status}">${STATUS_LABEL[p.status]}</span>` : ""}
+          ${chip(p)}
         </div>
         <div class="line">${esc(p.last_line || " ")}</div>
-      </button>`).join("")}`).join("");
+      </button>`).join("")}`).join("") + addWindow;
 }
 
-$("list-body").addEventListener("click", (e) => {
-  const b = e.target.closest("[data-pane]");
-  if (b) openPane(b.dataset.pane);
+// [rn] swaps the name for a text box. Enter saves; Escape or tapping away keeps the old name.
+function rename(target, name, path) {
+  renaming = true;
+  const input = Object.assign(document.createElement("input"), {
+    className: "rename", value: name, maxLength: 100, enterKeyHint: "done", autocapitalize: "off", autocomplete: "off", spellcheck: false,
+  });
+  input.setAttribute("autocorrect", "off");
+  target.replaceWith(input);
+  input.focus();
+  input.select();
+  let finished = false;
+  const finish = async (save) => {
+    if (finished) return;
+    finished = true;
+    if (save && input.value.trim() && input.value !== name) await act(path, { name: input.value });
+    renaming = false;
+    loadPanes();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(false));
+}
+
+$("list-body").addEventListener("click", async (e) => {
+  const a = e.target.closest("[data-act]");
+  if (!a) {
+    const b = e.target.closest("[data-pane]");
+    if (b) openPane(b.dataset.pane);
+    return;
+  }
+  const id = a.dataset.id, target = a.closest(".window-name, .pane").querySelector(".rn-target");
+  if (a.dataset.act === "rename-window") {
+    rename(target, panes.find((p) => p.window_id === id).window_name, `/api/windows/${id}/rename`);
+  } else if (a.dataset.act === "rename-pane") {
+    rename(target, panes.find((p) => p.id === id).title, `/api/panes/${id}/rename`);
+  } else if (a.dataset.act === "close-pane") {
+    if (confirm(`Close "${lastTitle[id]}"? Anything running in it stops.`) && await act(`/api/panes/${id}/close`)) loadPanes();
+  } else {
+    const r = await act(a.dataset.act === "add-pane" ? `/api/windows/${id}/panes` : "/api/windows");
+    if (r) openPane(r.pane);
+  }
+});
+
+$("edit").addEventListener("click", () => {
+  editMode = !editMode;
+  $("edit").textContent = editMode ? "done" : "edit";
+  renderPanes();
 });
 
 async function openPane(id) {
@@ -209,7 +292,7 @@ async function showList() {
   stopRecording(true);
   disarm();
   unsent = null;
-  setMic("●");
+  setMic(MIC_ICON);
   if (current) await act(`/api/panes/${current}/back`);
   current = null;
   $("pane").classList.add("hidden");
@@ -218,10 +301,6 @@ async function showList() {
 }
 
 $("back").addEventListener("click", showList);
-$("new-window").addEventListener("click", async () => {
-  const r = await act("/api/windows");
-  if (r) openPane(r.pane);
-});
 
 $("close-pane").addEventListener("click", async () => {
   if (!confirm(`Close "${$("pane-title").textContent}"? Anything running in it stops.`)) return;
@@ -290,21 +369,23 @@ $("attach").addEventListener("click", () => $("file").click());
 $("file").addEventListener("change", async () => {
   const pane = current, images = [];
   $("attach").disabled = true;
-  $("attach").textContent = "…";
+  $("attach").innerHTML = DOTS;
   for (const f of $("file").files) await photoBase64(f).then((b) => images.push(b), (e) => toast(`Couldn't read ${f.name}: ${e.message}`));
   $("file").value = "";
   if (images.length && pane === current) await act(`/api/panes/${pane}/paste`, { images });
   $("attach").disabled = false;
-  $("attach").textContent = "▣";
+  $("attach").innerHTML = PHOTO_ICON;
 });
 
 // Tap Mic to record, tap it again to end. The Mac transcribes it and pastes the text into the pane, without Enter.
 // A recording that fails to transcribe or paste is kept, and Mic becomes Retry, so nothing said is lost.
 let recorder = null, unsent = null, timer = null;
+const MIC_ICON = $("mic").innerHTML, PHOTO_ICON = $("attach").innerHTML;
+const DOTS = `<span class="dots"><i></i><i></i><i></i></span>`;
 
-function setMic(label, { recording = false, busy = false } = {}) {
+function setMic(html, { recording = false, busy = false } = {}) {
   const mic = $("mic");
-  mic.textContent = label;
+  mic.innerHTML = html;
   mic.classList.toggle("recording", recording);
   mic.disabled = busy;
 }
@@ -317,7 +398,7 @@ function stopRecording(discard) {
 
 async function sendAudio(audio) {
   const pane = current;
-  setMic("…", { busy: true });
+  setMic(DOTS, { busy: true });
   try {
     const r = await fetch("/api/transcribe", { method: "POST", headers: { "Content-Type": audio.type }, body: audio });
     const data = await r.json().catch(() => ({}));
@@ -325,7 +406,7 @@ async function sendAudio(audio) {
     if (pane !== current) return;  // left that pane while it was transcribing
     if (data.text) await post(`/api/panes/${pane}/paste`, { text: data.text });
     unsent = null;
-    setMic("●");
+    setMic(MIC_ICON);
     if (!data.text) toast("Didn't catch anything.");
   } catch (e) {
     if (pane !== current) return;
@@ -352,14 +433,14 @@ $("mic").addEventListener("click", async () => {
     clearInterval(timer);
     const { discard, mimeType } = recorder;
     recorder = null;
-    if (discard) return setMic("●");
+    if (discard) return setMic(MIC_ICON);
     const type = (mimeType || "audio/mp4").split(";")[0];
     sendAudio(new Blob(chunks, { type }));
   };
   recorder.start();
   const tick = () => {
     const s = Math.floor((Date.now() - started) / 1000);
-    setMic(`● ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`, { recording: true });
+    setMic(`${MIC_ICON} ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`, { recording: true });
   };
   tick();
   timer = setInterval(tick, 1000);
@@ -367,7 +448,15 @@ $("mic").addEventListener("click", async () => {
 
 // Our own client for ttyd's websocket (ttyd 1.7.7). The page sends its size as JSON first, then
 // "0" + typed bytes and "1" + new size. ttyd sends "0" + output, "1" + title, "2" + its settings.
-const term = new Terminal({ fontSize: 13, fontFamily: "Menlo, monospace", theme: { background: "#000000" } });
+// Pinch on the terminal sets its font size; it is kept in this browser for next time.
+const MIN_FONT = 8, MAX_FONT = 20, FONT_KEY = "tmux-phone.fontSize";
+function savedFontSize() {
+  try {
+    const n = Number(localStorage.getItem(FONT_KEY));
+    return n >= MIN_FONT && n <= MAX_FONT ? n : 13;
+  } catch { return 13; }
+}
+const term = new Terminal({ fontSize: savedFontSize(), fontFamily: "Menlo, monospace", theme: { background: "#000000" } });
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 const encoder = new TextEncoder();
@@ -414,6 +503,16 @@ function connect() {
 // This needs `mouse on` in tmux, which also makes tmux ask for SGR mouse codes. A tap opens the keyboard.
 const LINE_PX = 16, MAX_WHEEL = 10;
 let scrollY = null, scrollPx = 0, swiped = false;
+let pinch = null;  // finger distance and font size when a two-finger pinch began
+const fingerGap = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+
+function setFontSize(size) {
+  size = Math.min(MAX_FONT, Math.max(MIN_FONT, size));
+  if (size === term.options.fontSize) return;
+  term.options.fontSize = size;
+  fit.fit();  // the new columns and rows go to ttyd through onResize, and tmux re-fits the window
+  try { localStorage.setItem(FONT_KEY, String(size)); } catch {}
+}
 
 function sendWheel(up, count, x, y) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -425,12 +524,26 @@ function sendWheel(up, count, x, y) {
 }
 
 $("term-wrap").addEventListener("touchstart", (e) => {
+  if (e.touches.length > 1) {
+    // A second finger turns the touch into a pinch, which never scrolls and never opens the keyboard.
+    pinch = { gap: fingerGap(e.touches), size: term.options.fontSize };
+    scrollY = null;
+    swiped = true;
+    return;
+  }
+  pinch = null;
   scrollY = e.touches[0].clientY;
   scrollPx = 0;
   swiped = false;
 }, { passive: true, capture: true });
 $("term-wrap").addEventListener("touchmove", (e) => {
-  if (scrollY === null) return;
+  if (pinch) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.touches.length > 1) setFontSize(Math.round(pinch.size * fingerGap(e.touches) / pinch.gap));
+    return;
+  }
+  if (scrollY === null || e.touches.length > 1) return;
   e.preventDefault();
   e.stopPropagation();  // the terminal's own touch scrolling has nothing to scroll
   const { clientX: x, clientY: y } = e.touches[0];
@@ -442,10 +555,15 @@ $("term-wrap").addEventListener("touchmove", (e) => {
   scrollPx -= lines * LINE_PX;
   sendWheel(lines > 0, Math.min(Math.abs(lines), MAX_WHEEL), x, y);
 }, { passive: false, capture: true });
-$("term-wrap").addEventListener("touchend", () => {
+$("term-wrap").addEventListener("touchend", (e) => {
+  if (e.touches.length) return;  // a finger is still down
+  pinch = null;
   scrollY = null;
   if (!swiped) term.focus();  // inside the touch, so iOS opens the keyboard
 }, { passive: true, capture: true });
+
+// Only the terminal zooms: stop iOS from zooming the whole page on a pinch.
+for (const type of ["gesturestart", "gesturechange", "gestureend"]) document.addEventListener(type, (e) => e.preventDefault());
 
 // Swipe right on the header goes back to the list; the terminal itself keeps its own touches.
 let touchX = null;
