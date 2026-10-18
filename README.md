@@ -66,7 +66,7 @@ Anyone who gets in has a full shell on the Mac, so:
 ## Assumptions
 
 - One tmux server on the default socket. The terminal attaches to the most recently used session.
-- tmux has `set -g mouse on`. A swipe is sent as mouse wheel input; with the mouse off, it shows up as stray text in the pane.
+- tmux has `set -g mouse on`. A swipe is sent as mouse wheel input, which tmux acts on only with the mouse on.
 - A pane counts as Claude Code if its foreground process is named `claude`. The status chips read Claude Code's screen: the `❯` input box and the spinner line. A Claude Code UI change can break them.
 
 ## Uninstall
