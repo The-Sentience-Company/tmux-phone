@@ -115,13 +115,14 @@ def main():
         status, body = request("/api/panes")
         assert status == 200, f"GET /api/panes returned {status}: {body[:200]!r}"
         listed = sorted(p["id"] for p in json.loads(body)["panes"])
-        real = sorted(tmux("list-panes", "-a", "-F", "#{pane_id}").replace("%", "").split())
+        # The phone's tmux session shares the Mac session's windows, so `list-panes -a` lists them twice; count each once.
+        real = sorted(set(tmux("list-panes", "-a", "-F", "#{pane_id}").replace("%", "").split()))
         assert listed == real, f"list shows {listed}, tmux has {real}"
     check("pane list matches tmux", pane_list)
 
     def terminal():
-        # Attach at the window's own size so the Mac's layout doesn't change.
-        pane, columns, rows = tmux("display-message", "-p", "#{pane_id} #{window_width} #{window_height}").split()
+        # The stream shows the phone's own tmux session. Attach at its window's size so the Mac's layout doesn't change.
+        pane, columns, rows = tmux("display-message", "-p", "-t", "=phone:", "#{pane_id} #{window_width} #{window_height}").split()
         status, text = terminal_stream(ORIGIN, seconds=3, columns=int(columns), rows=int(rows))
         assert " 101 " in status, f"websocket handshake: {status}"
         assert text, "connected, but no terminal output arrived (the 'Reconnecting…' bug)"

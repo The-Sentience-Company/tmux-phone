@@ -70,6 +70,23 @@ def tmux(*args, stdin=None):
     return r.stdout
 
 
+# The phone's own tmux session. It shares the Mac session's windows (a tmux session group) but has its own
+# current window and no status line, so switching windows on the phone does not move the Mac.
+PHONE = "phone"
+
+
+def ensure_phone_session():
+    """Create the phone's session if it is gone: grouped with the most recently used other session, status line off."""
+    if subprocess.run(["tmux", "has-session", "-t", f"={PHONE}"], capture_output=True).returncode:
+        sessions = subprocess.run(["tmux", "list-sessions", "-F", "#{session_last_attached} #{session_name}"],
+                                  capture_output=True, text=True).stdout.splitlines()
+        others = sorted((line.split(" ", 1) for line in sessions if line.split(" ", 1)[1] != PHONE),
+                        key=lambda s: int(s[0] or 0), reverse=True)
+        group = ["-t", f"={others[0][1]}"] if others else []
+        tmux("new-session", "-d", "-s", PHONE, *group)
+        tmux("set-option", "-t", f"={PHONE}:", "status", "off")  # set-option takes a pane target, so the colon
+
+
 def claude_ttys():
     """ttys whose foreground process is Claude Code."""
     out = subprocess.run(["ps", "-A", "-o", "tty=,stat=,comm="], capture_output=True, text=True, env={"LC_ALL": "C"}).stdout
@@ -113,7 +130,9 @@ def status(lines):
 
 
 def list_panes():
-    out = tmux("list-panes", "-a", "-F", "\x1f".join(f"#{{{f}}}" for f in PANE_FIELDS))
+    ensure_phone_session()
+    # The phone session's panes, each once: `list-panes -a` would list a grouped window once per session.
+    out = tmux("list-panes", "-s", "-t", f"={PHONE}", "-F", "\x1f".join(f"#{{{f}}}" for f in PANE_FIELDS))
     claude = claude_ttys()
     panes = []
     for row in out.splitlines():
@@ -134,13 +153,21 @@ def list_panes():
     return panes
 
 
+def phone_windows():
+    """The phone session's windows for the status line, in tmux's order, with the phone's current one marked."""
+    out = tmux("list-windows", "-t", f"={PHONE}", "-F", "#{window_index}\x1f#{window_name}\x1f#{window_active}")
+    return [{"index": int(i), "name": n, "active": a == "1"} for i, n, a in (l.split("\x1f") for l in out.splitlines())]
+
+
 def pane_info(pane, *fields):
     return tmux("display-message", "-p", "-t", pane, "\x1f".join(f"#{{{f}}}" for f in fields)).rstrip("\n").split("\x1f")
 
 
 def open_pane(pane):
-    """Show one pane full screen on the phone: switch to it, and zoom it if its window is split."""
-    tmux("select-window", "-t", pane)
+    """Show one pane full screen on the phone: switch the phone's session to it, and zoom it if its window is split.
+    The window is named through the phone's session; a bare %pane could pick the Mac's session and switch the Mac."""
+    ensure_phone_session()
+    tmux("select-window", "-t", f"={PHONE}:{pane_info(pane, 'window_id')[0]}")
     tmux("select-pane", "-t", pane)
     panes, zoomed = pane_info(pane, "window_panes", "window_zoomed_flag")
     if panes != "1" and zoomed == "0":
@@ -249,7 +276,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path in STATIC_FILES:
                 return self.reply(200, (STATIC / self.path.lstrip("/")).read_bytes(), STATIC_FILES[self.path])
             if self.path == "/api/panes":
-                return self.reply(200, {"panes": list_panes(), "version": version(INDEX.read_bytes())})
+                panes = list_panes()
+                return self.reply(200, {"panes": panes, "windows": phone_windows(), "version": version(INDEX.read_bytes())})
             self.reply(404, {"error": "not found"})
         except TmuxError as e:
             self.reply(502, {"error": str(e)})
@@ -278,7 +306,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/api/windows":
-                return self.reply(200, {"pane": tmux("new-window", "-P", "-F", "#{pane_id}").strip().lstrip("%")})
+                ensure_phone_session()  # the new window joins the group, so the Mac has it too
+                return self.reply(200, {"pane": tmux("new-window", "-t", f"={PHONE}:", "-P", "-F", "#{pane_id}").strip().lstrip("%")})
             m = WINDOW_ROUTE.match(self.path)
             if m:
                 window, action = f"@{m[1]}", m[2]
@@ -378,9 +407,15 @@ def start_ttyd():
     TTYD_SOCKET.unlink(missing_ok=True)
     proc = subprocess.Popen([
         "ttyd", "--interface", str(TTYD_SOCKET), "--base-path", "/term", "--writable", "--check-origin",
-        "tmux", "attach",
+        sys.executable, str(Path(__file__).resolve()), "attach",
     ])
     threading.Thread(target=lambda: (proc.wait(), os._exit(1)), daemon=True).start()
+
+
+def keep_awake():
+    """Plugged in, the Mac does not sleep while this server runs (-s works on AC only; the display may still sleep).
+    caffeinate exits with the server. It is not needed to serve, so its exit does not stop the server."""
+    subprocess.Popen(["caffeinate", "-s", "-w", str(os.getpid())])
 
 
 def start_whisper():
@@ -391,10 +426,15 @@ def start_whisper():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["attach"]:
+        # What ttyd runs for each terminal connection: attach to the phone's session, made again if it is gone.
+        ensure_phone_session()
+        os.execvp("tmux", ["tmux", "attach", "-t", f"={PHONE}"])
     if not (PUBLIC_ORIGIN and ALLOWED_LOGIN):
         sys.exit("TMUX_PHONE_ORIGIN and TMUX_PHONE_LOGIN must be set; run ./install.sh")
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     start_ttyd()
     start_whisper()
+    keep_awake()
     print(f"tmux-phone on http://{HOST}:{PORT} for {ALLOWED_LOGIN} at {PUBLIC_ORIGIN}", flush=True)
     Server((HOST, PORT), Handler).serve_forever()
