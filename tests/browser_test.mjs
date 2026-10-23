@@ -259,7 +259,7 @@ async function main() {
         const st = getComputedStyle($("statusline"));
         return st.borderTopWidth + " " + st.borderTopColor;
       });
-      assert(border === "1px rgb(48, 48, 48)", `the strip's top line is ${border}`);
+      assert(border === "1px rgb(87, 88, 79)", `the strip's top line is ${border}`);
       const bar = await page.locator("#keys .bar").boundingBox(), strip = await page.locator("#statusline").boundingBox();
       const height = page.viewportSize().height;
       assert(strip.y >= bar.y + bar.height - 1 && Math.abs(strip.y + strip.height - height) <= 1 && strip.height >= 20,
@@ -547,7 +547,7 @@ async function main() {
         header: [...document.querySelectorAll("#files header > *")].filter((e) => !e.classList.contains("hidden")).map((e) => e.textContent),
       }));
       assert(look.keyword !== look.plain && look.comment !== look.plain, `no highlighting: ${JSON.stringify(look)}`);
-      assert(look.background === "rgb(0, 0, 0)", `background ${look.background}`);
+      assert(look.background === "rgb(39, 40, 34)", `background ${look.background}`);
       assert(look.numbers.includes("1") && look.numbers.includes("2"), `line numbers ${look.numbers}`);
       assert(look.editable === "false", `contenteditable=${look.editable}`);
       assert(JSON.stringify(look.header) === JSON.stringify(["‹ back", "b.py", "edit"]), `header: ${look.header}`);
@@ -973,6 +973,21 @@ async function main() {
       tmux("kill-session", "-t", "=_phone");
       await waitFor(async () => (await currentName(page)) === "mac", 10000, `the phone on mac (is ${await currentName(page)})`);
       assert(viewerGroupMate() === "mac", `_phone is grouped with ${viewerGroupMate()}`);
+    });
+
+    await check("[theme] sets the terminal's and the page's colors, and keeps them after a reload", async () => {
+      if (await page.isVisible("#back")) await page.tap("#back");
+      await page.tap("#theme-open");
+      await page.tap('[data-theme="gruvbox-dark-hard"]');
+      const colors = () => page.evaluate(() => [getComputedStyle(document.body).backgroundColor, term.options.theme.background,
+                                                term.options.theme.brightRed, document.querySelector(".theme-row.current").dataset.theme]);
+      const want = "rgb(29, 32, 33),#1d2021,#fb4934,gruvbox-dark-hard";
+      assert(String(await colors()) === want, `colors are ${await colors()}`);
+      await page.reload();
+      await page.tap("#theme-open");
+      assert(String(await colors()) === want, `after a reload, colors are ${await colors()}`);
+      await page.tap("#themes-back");
+      assert(await page.isVisible("#list-body"), "[‹ back] did not go back to the list");
     });
 
     await context.close();

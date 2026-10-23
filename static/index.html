@@ -16,7 +16,7 @@
 <style>
   :root {
     --bg: #000; --fg: #d0d0d0; --dim: #767676; --line: #303030;
-    --green: #5fd75f; --red: #ff5f5f; --yellow: #d7d75f; --cyan: #5fd7d7;
+    --green: #5fd75f; --red: #ff5f5f; --yellow: #d7d75f; --cyan: #5fd7d7; --magenta: #d787d7; --blue: #87afd7;
     --font: Menlo, ui-monospace, "SF Mono", monospace;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -43,7 +43,7 @@
      nothing in it is tappable.
      A dim line splits it from the key bar or the list. The phone's tmux session has its status line turned off. */
   #statusline { position: absolute; left: 0; right: 0; bottom: 0; height: var(--strip); display: flex; align-items: flex-start;
-    justify-content: center; padding-top: 2px; border-top: 1px solid var(--line); background: var(--bg); color: #a8a8a8;
+    justify-content: center; padding-top: 2px; border-top: 1px solid var(--line); background: var(--bg); color: var(--fg);
     font-size: 12px; line-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .hidden { display: none !important; }
   header { display: flex; align-items: center; padding: 0 2px; border-bottom: 1px solid var(--line); }
@@ -92,7 +92,7 @@
   .rename { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--green);
     border-radius: 0; padding: 0 4px; outline: none; }
 
-  #term-wrap { flex: 1; min-height: 0; background: #000; position: relative; touch-action: none; overflow: hidden; }
+  #term-wrap { flex: 1; min-height: 0; background: var(--bg); position: relative; touch-action: none; overflow: hidden; }
   #term { width: 100%; height: 100%; }
   .bar { display: flex; overflow-x: auto; border-top: 1px solid var(--line); flex-shrink: 0; scrollbar-width: none; }
   .bar::-webkit-scrollbar { display: none; }
@@ -130,14 +130,19 @@
   #file-body .cm-scroller { font-family: var(--font); line-height: 1.4; -webkit-overflow-scrolling: touch; }
   #file-body .cm-content { caret-color: var(--fg); }
   #file-body .cm-gutters { background: var(--bg); color: var(--dim); border-right: 1px solid var(--line); }
-  #file-body .tok-keyword { color: #d787d7; } #file-body .tok-string, #file-body .tok-string2 { color: var(--green); }
+  #file-body .tok-keyword { color: var(--magenta); } #file-body .tok-string, #file-body .tok-string2 { color: var(--green); }
   #file-body .tok-comment { color: var(--dim); font-style: italic; } #file-body .tok-meta { color: var(--dim); }
   #file-body .tok-number, #file-body .tok-bool, #file-body .tok-atom, #file-body .tok-literal { color: var(--yellow); }
   #file-body .tok-typeName, #file-body .tok-className, #file-body .tok-namespace { color: var(--cyan); }
-  #file-body .tok-propertyName { color: #87afd7; } #file-body .tok-definition { color: #ffffff; }
+  #file-body .tok-propertyName { color: var(--blue); } #file-body .tok-definition { color: var(--fg); }
   #file-body .tok-heading { color: var(--green); font-weight: bold; } #file-body .tok-link, #file-body .tok-url { color: var(--cyan); }
   #file-body .tok-emphasis { font-style: italic; } #file-body .tok-strong { font-weight: bold; }
   #file-body .tok-inserted { color: var(--green); } #file-body .tok-deleted, #file-body .tok-invalid { color: var(--red); }
+  /* The theme screen: one row per theme, drawn in its own colors, with its six colors after the name. */
+  #theme-list { flex: 1; overflow-y: auto; }
+  .theme-row { display: flex; width: 100%; min-height: 44px; align-items: center; gap: 1ch; text-align: left; padding: 0 8px; }
+  .theme-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .theme-row.current { outline: 2px solid var(--green); outline-offset: -2px; }
   #toast { position: fixed; left: 8px; right: 8px; bottom: 120px; background: var(--bg); color: var(--fg);
     border: 1px solid var(--green); padding: 6px 8px; z-index: 10; }
 </style>
@@ -147,6 +152,7 @@
 <section id="list" class="view">
   <header>
     <h1>tmux</h1>
+    <button id="theme-open">theme</button>
     <button id="edit">edit</button>
   </header>
   <div id="list-body"></div>
@@ -197,6 +203,14 @@
   <div id="folder"></div>
   <div id="file-note" class="hidden"></div>
   <div id="file-body" class="hidden"></div>
+</section>
+
+<section id="themes" class="view hidden">
+  <header>
+    <button id="themes-back">‹ back</button>
+    <h1>theme</h1>
+  </header>
+  <div id="theme-list"></div>
 </section>
 
 <div id="statusline"></div>
@@ -626,7 +640,7 @@ function savedFontSize() {
     return n >= MIN_FONT && n <= MAX_FONT ? n : 13;
   } catch { return 13; }
 }
-const term = new Terminal({ fontSize: savedFontSize(), fontFamily: "Menlo, monospace", theme: { background: "#000000" } });
+const term = new Terminal({ fontSize: savedFontSize(), fontFamily: "Menlo, monospace" });
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 const encoder = new TextEncoder();
@@ -947,6 +961,69 @@ $("file-body").addEventListener("touchmove", (e) => {
   setFontSize(Math.round(filePinch.size * fingerGap(e.touches) / filePinch.gap));
 }, { passive: false });
 $("file-body").addEventListener("touchend", (e) => { if (e.touches.length < 2) filePinch = null; }, { passive: true });
+
+// A theme colors the terminal's 16 colors and the page around it. It is kept in this browser, like the font size.
+// Each is: background, foreground, selection, then colors 0-15. Colors are from Ghostty's themes, the Cursor ones
+// from Cursor's own theme files, with their see-through colors mixed onto the background.
+const THEMES = {
+  "monokai": "#272822 #fdfff1 #57584f #272822 #f92672 #a6e22e #e6db74 #fd971f #ae81ff #66d9ef #fdfff1 #6e7066 #f92672 #a6e22e #e6db74 #fd971f #ae81ff #66d9ef #fdfff1",
+  "gruvbox-dark-hard": "#1d2021 #ebdbb2 #665c54 #1d2021 #cc241d #98971a #d79921 #458588 #b16286 #689d6a #a89984 #928374 #fb4934 #b8bb26 #fabd2f #83a598 #d3869b #8ec07c #ebdbb2",
+  "gruvbox-dark": "#282828 #ebdbb2 #665c54 #282828 #cc241d #98971a #d79921 #458588 #b16286 #689d6a #a89984 #928374 #fb4934 #b8bb26 #fabd2f #83a598 #d3869b #8ec07c #ebdbb2",
+  "cursor-dark": "#141414 #f0f0f0 #2e2e2e #242424 #fc6b83 #3fa266 #d2943e #81a1c1 #b48ead #88c0d0 #f0f0f0 #989898 #fc6b83 #70b489 #f1b467 #87a6c4 #b48ead #88c0d0 #ffffff",
+  "cursor-dark-midnight": "#191c22 #d8dee9 #272c36 #272c36 #bf616a #a3be8c #ebcb8b #81a1c1 #7d7c9b #88c0d0 #e5e9f0 #4c566a #bf616a #a3be8c #ebcb8b #81a1c1 #b48ead #8fbcbb #eceff4",
+  "cursor-dark-high-contrast": "#0a0a0a #f0f0f0 #1c1c1c #2a2a2a #bf616a #a3be8c #ebcb8b #81a1c1 #b48ead #88c0d0 #f0f0f0 #989898 #bf616a #a3be8c #ebcb8b #81a1c1 #b48ead #88c0d0 #ffffff",
+  "cursor-light": "#f3f3f3 #141414 #d4d4d4 #141414 #be1744 #007041 #8b5700 #0064b0 #92156a #176c74 #fcfcfc #4e4e4e #ce405b #00854c #a46700 #2778c1 #b54e90 #3b7e84 #ffffff",
+  "dracula": "#282a36 #f8f8f2 #44475a #21222c #ff5555 #50fa7b #f1fa8c #bd93f9 #ff79c6 #8be9fd #f8f8f2 #6272a4 #ff6e6e #69ff94 #ffffa5 #d6acff #ff92df #a4ffff #ffffff",
+  "catppuccin-mocha": "#1e1e2e #cdd6f4 #585b70 #45475a #f38ba8 #a6e3a1 #f9e2af #89b4fa #f5c2e7 #94e2d5 #a6adc8 #585b70 #f37799 #89d88b #ebd391 #74a8fc #f2aede #6bd7ca #bac2de",
+  "tokyo-night": "#1a1b26 #c0caf5 #33467c #15161e #f7768e #9ece6a #e0af68 #7aa2f7 #bb9af7 #7dcfff #a9b1d6 #414868 #f7768e #9ece6a #e0af68 #7aa2f7 #bb9af7 #7dcfff #c0caf5",
+  "nord": "#2e3440 #d8dee9 #434c5e #3b4252 #bf616a #a3be8c #ebcb8b #81a1c1 #b48ead #88c0d0 #e5e9f0 #596377 #bf616a #a3be8c #ebcb8b #81a1c1 #b48ead #8fbcbb #eceff4",
+  "one-dark": "#21252b #abb2bf #323844 #21252b #e06c75 #98c379 #e5c07b #61afef #c678dd #56b6c2 #abb2bf #767676 #e06c75 #98c379 #e5c07b #61afef #c678dd #56b6c2 #abb2bf",
+  "solarized-dark": "#002b36 #839496 #073642 #073642 #dc322f #859900 #b58900 #268bd2 #d33682 #2aa198 #eee8d5 #335e69 #cb4b16 #586e75 #657b83 #839496 #6c71c4 #93a1a1 #fdf6e3",
+  "xterm": "#000000 #d0d0d0 #303030 #000000 #cd3131 #0dbc79 #e5e510 #2472c8 #bc3fbc #11a8cd #e5e5e5 #666666 #f14c4c #23d18b #f5f543 #3b8eea #d670d6 #29b8db #e5e5e5",
+};
+const THEME_KEY = "tmux-phone.theme", ANSI = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
+let theme = "monokai";
+try { if (THEMES[localStorage.getItem(THEME_KEY)]) theme = localStorage.getItem(THEME_KEY); } catch {}
+
+// The page's colors come from the theme's: dim is its gray (color 8), lines its selection, and the accents its
+// plain colors 1-6, as some themes, like Solarized, make the bright ones grays.
+function setTheme(name) {
+  theme = name;
+  const [bg, fg, selection, ...c] = THEMES[name].split(" ");
+  const vars = { bg, fg, dim: c[8], line: selection, red: c[1], green: c[2], yellow: c[3], blue: c[4], magenta: c[5], cyan: c[6] };
+  for (const [k, v] of Object.entries(vars)) document.documentElement.style.setProperty(`--${k}`, v);
+  document.querySelector('meta[name="theme-color"]').content = bg;
+  const colors = Object.fromEntries(c.map((v, i) => [i < 8 ? ANSI[i] : "bright" + ANSI[i - 8][0].toUpperCase() + ANSI[i - 8].slice(1), v]));
+  term.options.theme = { background: bg, foreground: fg, cursor: fg, cursorAccent: bg, selectionBackground: selection, ...colors };
+  try { localStorage.setItem(THEME_KEY, name); } catch {}
+}
+
+// [theme] in the list opens the theme screen. A tap on a theme sets it at once; [‹ back] goes back to the list.
+function renderThemes() {
+  $("theme-list").innerHTML = Object.entries(THEMES).map(([name, colors]) => {
+    const [bg, fg, , ...c] = colors.split(" ");
+    const swatches = c.slice(1, 7).map((v) => `<span style="color:${v}">██</span>`).join("");
+    return `<button class="theme-row${name === theme ? " current" : ""}" data-theme="${name}" style="background:${bg};color:${fg}">` +
+      `<span class="name">${name}</span><span>${swatches}</span></button>`;
+  }).join("");
+}
+
+$("theme-open").addEventListener("click", () => {
+  renderThemes();
+  $("list").classList.add("hidden");
+  $("themes").classList.remove("hidden");
+});
+$("theme-list").addEventListener("click", (e) => {
+  const row = e.target.closest("[data-theme]");
+  if (!row) return;
+  setTheme(row.dataset.theme);
+  renderThemes();
+});
+$("themes-back").addEventListener("click", () => {
+  $("themes").classList.add("hidden");
+  $("list").classList.remove("hidden");
+});
+setTheme(theme);
 
 // iOS drops the connection while the app is in the background; reconnect at once on return.
 document.addEventListener("visibilitychange", () => {

@@ -23,7 +23,8 @@ It's for checking on and replying to Claude Code agents running in tmux panes. I
 - **Updates:** the page reloads itself when `index.html` or `server.py` changes on the Mac, and reopens the pane you were on. It waits while you record, send a photo or paste, or rename. The server hashes both files into a version; the page checks it on every 3 s poll, in the list and in a pane.
 - **Awake:** plugged in, the Mac stays awake while tmux-phone runs (`caffeinate -s`); the display can still sleep. On battery or with the lid closed it still sleeps.
 - **Keyboard:** the page is pinned to the area above the iOS keyboard, so the header, the terminal (refit, so tmux reflows) and the key bar all stay visible.
-- **Look:** a terminal look throughout: black, monospace, square, `[bracketed]` header buttons.
+- **Look:** a terminal look throughout: monospace, square, `[bracketed]` header buttons.
+- **Theme:** `[theme]` on the list opens the themes, each row drawn in its own colors. A tap sets it at once, for the terminal's 16 colors and the page around it. Monokai is the default. Also gruvbox-dark-hard, gruvbox-dark, the four Cursor dark and light themes, dracula, catppuccin-mocha, tokyo-night, nord, one-dark, solarized-dark, and xterm (the old black look). Kept in this browser, like the font size. Apps that draw in their own 24-bit colors keep them.
 - **Dictation:** tap mic, talk, tap it again (it shows the time while recording). Whisper large-v3-turbo transcribes it on the Mac in about a second and pastes the text into the pane. Nothing is submitted until you press Enter. The audio never leaves the Mac.
 
 ## Sessions
