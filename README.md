@@ -45,12 +45,15 @@ tmux resizes to fit the phone while it's attached. It resizes back when you use 
 Needs macOS, Homebrew, and the Tailscale app signed in on both the Mac and the phone.
 
 ```
-brew install tmux ttyd whisper-cpp ffmpeg
-./install.sh you@example.com     # your Tailscale login
+brew install tmux ttyd
+brew install whisper-cpp ffmpeg   # for dictation; leave out to go without the mic
+./install.sh
 ```
 
 The installer:
-- downloads the speech model (574 MB) to `~/.local/state/tmux-phone/models`
+- names any missing tool, with the `brew install` line to get it
+- lets in only the Tailscale login this Mac is signed in with
+- downloads the speech model (574 MB) to `~/.local/state/tmux-phone/models`, if whisper-cpp and ffmpeg are installed. Without them dictation is off and the mic is hidden; install them and re-run to turn it on.
 - installs the launchd service `com.tmux-phone`, which starts at login and restarts if it crashes
 - publishes it with `tailscale serve`
 

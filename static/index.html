@@ -282,6 +282,7 @@ async function loadPanes(poll = false) {
   panes = fresh.panes;
   sessions = fresh.sessions;
   if (fresh.version !== VERSION) reloadWhenSafe();
+  $("mic").style.display = fresh.dictation === false ? "none" : "";
   const open = panes.find((p) => p.id === current);
   if (open) hideBorderRow(open.border);
   for (const p of panes) lastTitle[p.id] = p.title || p.command;

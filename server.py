@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -43,6 +44,8 @@ UPLOAD_DAYS = 7
 IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg", b"GIF87a": "gif", b"GIF89a": "gif"}
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 WHISPER_HOST, WHISPER_PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_WHISPER_PORT", "8767"))
+# Dictation is on if install.sh found whisper-cpp and ffmpeg and downloaded the model; otherwise the page hides the mic.
+DICTATION = WHISPER_MODEL.exists() and bool(shutil.which("whisper-server")) and bool(shutil.which("ffmpeg"))
 
 PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|paste|key|close|rename)$")
 WINDOW_ROUTE = re.compile(r"^/api/windows/(\d+)/(rename|panes|close)$")  # by window id: 3 is tmux's @3
@@ -472,7 +475,7 @@ class Handler(BaseHTTPRequestHandler):
                 target = ensure_viewer()
                 panes = list_panes()
                 return self.reply(200, {"panes": panes, "sessions": sessions_for_phone(target),
-                                        "version": version(INDEX.read_bytes())})
+                                        "version": version(INDEX.read_bytes()), "dictation": DICTATION})
             url = urlsplit(self.path)
             if url.path in ("/api/files", "/api/file"):
                 query = {k: v[0] for k, v in parse_qs(url.query).items()}
@@ -684,7 +687,8 @@ if __name__ == "__main__":
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     kill_old_viewer()
     start_ttyd()
-    start_whisper()
+    if DICTATION:
+        start_whisper()
     keep_awake()
     print(f"tmux-phone on http://{HOST}:{PORT} for {ALLOWED_LOGIN} at {PUBLIC_ORIGIN}", flush=True)
     Server((HOST, PORT), Handler).serve_forever()

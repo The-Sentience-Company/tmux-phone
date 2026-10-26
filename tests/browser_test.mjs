@@ -344,6 +344,19 @@ async function main() {
       assert(!(await page.evaluate(() => window.__sawReconnectPrompt)), `the page showed "${RECONNECT_PROMPT}"`);
     });
 
+    await check("without the speech model the mic is hidden, and with it the mic shows", async () => {
+      const link = path.join(state, "models/ggml-large-v3-turbo-q5_0.bin");
+      assert(await page.isVisible("#mic"), "the mic is hidden while dictation is on");
+      await stopServer();
+      fs.unlinkSync(link);
+      await startServer(port, whisperPort);
+      await waitFor(async () => !(await page.isVisible("#mic")), 10000, "the mic to hide");
+      await stopServer();
+      fs.symlinkSync(MODEL, link);
+      await startServer(port, whisperPort);
+      await waitFor(() => page.isVisible("#mic"), 10000, "the mic to show again");
+    });
+
     await check("tapping a key bar button keeps the keyboard on the terminal", async () => {
       await page.focus(".xterm-helper-textarea");
       await page.tap('[data-key="1"]');
