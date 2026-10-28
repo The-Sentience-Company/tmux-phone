@@ -627,7 +627,7 @@ def for_you_popup(args):
         subprocess.run(["peek", args[1]])
         return
     me = f"{sys.executable} {Path(__file__).resolve()} for-you"
-    subprocess.run(["fzf", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--header", "for you · enter opens · esc closes",
+    subprocess.run(["fzf", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--header", "files agents left for you, newest first · enter opens · esc closes",
                     "--bind", f"start:reload({me} list)", "--bind", f"enter:execute({me} open {{1}})+reload({me} list)"])
 
 

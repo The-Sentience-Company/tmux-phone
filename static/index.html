@@ -354,6 +354,7 @@ async function openForYou(path) {
   if (!file) return;
   filesFromList = true;
   $("list").classList.add("hidden");
+  $("pane").classList.add("hidden");  // a tapped notification can arrive while a pane is open
   $("files").classList.remove("hidden");
 }
 
@@ -1091,13 +1092,13 @@ async function subscribePush() {
 }
 
 if ("serviceWorker" in navigator && "PushManager" in window && "Notification" in window) {
-  if (Notification.permission === "granted") subscribePush().catch((e) => toast(`Notifications are off: ${e.message}`));
+  if (Notification.permission === "granted") subscribePush().catch(() => $("notify").classList.remove("hidden"));
   else if (Notification.permission === "default") $("notify").classList.remove("hidden");
 }
 $("notify").addEventListener("click", async () => {
   if (await Notification.requestPermission() !== "granted") return toast("Notifications not allowed. Turn them on in Settings.");
   try { await subscribePush(); $("notify").classList.add("hidden"); toast("Notifications on"); }
-  catch (e) { toast(`Couldn't turn on notifications: ${e.message}`); }
+  catch { toast("Couldn't turn on notifications. Tap [notify] to try again."); }
 });
 
 // A tapped notification opens the app at /#for-you=<path>.
