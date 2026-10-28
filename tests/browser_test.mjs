@@ -988,13 +988,13 @@ async function main() {
       await page.waitForSelector(`button[data-pane="${paneId}"]`);
     });
 
-    await check("a file in for-ahmet shows on top of the list as new; opening it marks it seen and back returns to the list", async () => {
+    await check("a file in for-ahmet shows on top of the list as new; opening it marks it seen and back returns to the list; [x] deletes after a confirm", async () => {
       const forYou = path.join(home, "notes/sentience/agent-comapny/for-ahmet");
       fs.mkdirSync(forYou, { recursive: true });
       fs.writeFileSync(path.join(forYou, "older-note.txt"), "older\n");
       fs.utimesSync(path.join(forYou, "older-note.txt"), 1000, 1000);
       fs.writeFileSync(path.join(forYou, "build-log.txt"), "the build passed\n");
-      const rows = () => page.evaluate(() => [...document.querySelectorAll("[data-for-you]")].map((b) => b.querySelector(".top").textContent.trim()));
+      const rows = () => page.evaluate(() => [...document.querySelectorAll("[data-for-you]")].map((b) => b.querySelector(".title").textContent + (b.querySelector(".status")?.textContent || "")));
       await waitFor(async () => (await rows()).length === 2, 5000, "two for-you rows");
       assert(JSON.stringify(await rows()) === JSON.stringify(["build-log.txtnew", "older-note.txtnew"]), `rows: ${JSON.stringify(await rows())}`);
       const first = await page.evaluate(() => document.querySelector("#list-body").firstElementChild.textContent.trim());
@@ -1006,6 +1006,13 @@ async function main() {
       assert(await page.locator("#files").isHidden(), "the file screen still shows");
       await waitFor(async () => JSON.stringify(await rows()) === JSON.stringify(["build-log.txt", "older-note.txtnew"]), 5000,
         `build-log.txt seen (${JSON.stringify(await rows())})`);
+      let message = "";
+      page.once("dialog", (d) => { message = d.message(); d.accept(); });
+      await page.tap('[data-delete-for-you$="older-note.txt"]');
+      await waitFor(async () => JSON.stringify(await rows()) === JSON.stringify(["build-log.txt"]), 5000, `older-note.txt gone (${JSON.stringify(await rows())})`);
+      assert(/^Delete "older-note.txt"\?/.test(message), `the confirm said: ${JSON.stringify(message)}`);
+      assert(!fs.existsSync(path.join(forYou, "older-note.txt")), "the file is still on disk");
+      assert(await page.locator("#list").isVisible(), "[x] opened the file");
       fs.rmSync(forYou, { recursive: true });
       await waitFor(async () => (await rows()).length === 0, 5000, "no for-you rows once the folder is gone");
     });

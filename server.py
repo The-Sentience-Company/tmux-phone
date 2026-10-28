@@ -563,6 +563,13 @@ def mark_seen(path):
     write_json(FOR_YOU_SEEN, seen)
 
 
+def delete_for_you(path):
+    """Deletes a file in FOR_YOU; any other path is refused."""
+    if Path(path).parent != FOR_YOU:
+        raise ValueError("not a for-you file")
+    Path(path).unlink(missing_ok=True)
+
+
 def b64url(data):
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -643,18 +650,24 @@ def watch_for_you():
 
 def for_you_popup(args):
     """What the tmux key runs in a popup: the for-you files in fzf, newest first; Enter opens one with peek.
-    fzf calls back `for-you list` to fill and refresh the list, and `for-you open <path>` to open a file."""
+    fzf calls back `for-you list` to fill and refresh the list, `for-you open <path>` and `for-you delete <path>`."""
     if args[:1] == ["list"]:
         for i in for_you():
             print(f"{i['path']}\t{'new ' if not i['seen'] else '    '} {i['name']}")
+        return
+    if args[:1] == ["delete"]:
+        answer = input(f"Delete {Path(args[1]).name}? The file is deleted from the Mac. [y/N] ")
+        if answer.strip().lower() == "y":
+            delete_for_you(args[1])
         return
     if args[:1] == ["open"]:
         mark_seen(args[1])
         subprocess.run(["peek", args[1]])
         return
     me = f"{sys.executable} {Path(__file__).resolve()} for-you"
-    subprocess.run(["fzf", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--header", "files agents left for you, newest first · enter opens · esc closes",
-                    "--bind", f"start:reload({me} list)", "--bind", f"enter:execute({me} open {{1}})+reload({me} list)"])
+    subprocess.run(["fzf", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--header", "files agents left for you, newest first · enter opens · ctrl-x deletes · esc closes",
+                    "--bind", f"start:reload({me} list)", "--bind", f"enter:execute({me} open {{1}})+reload({me} list)",
+                    "--bind", f"ctrl-x:execute({me} delete {{1}})+reload({me} list)"])
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -796,6 +809,14 @@ class Handler(BaseHTTPRequestHandler):
                 if new_mtime is None:
                     return self.reply(409, {"error": "Not saved: the file changed on disk after you opened it. Go back and open it again."})
                 return self.reply(200, {"mtime": new_mtime})
+            if self.path == "/api/for-you/delete":
+                if not isinstance(body.get("path"), str):
+                    return self.reply(400, {"error": "bad path"})
+                try:
+                    delete_for_you(body["path"])
+                except ValueError as e:
+                    return self.reply(400, {"error": str(e)})
+                return self.reply(200, {})
             if self.path == "/api/push/subscribe":
                 sub = body.get("subscription") or {}
                 if not (isinstance(sub.get("endpoint"), str) and sub["endpoint"].startswith("https://")):

@@ -35,6 +35,14 @@ assert [(i["name"], i["seen"]) for i in server.for_you()] == [("old.png", False)
 server.mark_seen(str(tmp / "elsewhere.txt"))
 assert not any(i["seen"] for i in server.for_you()), "a file outside the folder is ignored"
 
+server.delete_for_you(str(new))
+assert [i["name"] for i in server.for_you()] == ["old.png"]
+try:
+    server.delete_for_you(str(tmp / "seen.json"))
+    raise AssertionError("deleted a file outside the folder")
+except ValueError:
+    pass
+
 # The JWT's r||s signature, put back into DER, must verify with the public key the browser subscribes with.
 b64 = lambda s: base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 key = b64(server.vapid_public_key())

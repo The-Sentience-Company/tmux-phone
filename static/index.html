@@ -349,10 +349,11 @@ function renderForYou() {
     return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
   };
   return `<div class="window-name"><span class="name">for you</span></div>` + items.map((item, i) => `
-    <button class="pane${i === items.length - 1 ? " last" : ""}${item.seen ? " seen" : ""}" data-for-you="${esc(item.path)}">
-      <div class="top"><span class="title">${esc(item.name)}</span>${item.seen ? "" : `<span class="status needs_you">new</span>`}</div>
+    <div class="pane${i === items.length - 1 ? " last" : ""}${item.seen ? " seen" : ""}" data-for-you="${esc(item.path)}">
+      <div class="top"><span class="title">${esc(item.name)}</span>${item.seen ? "" : `<span class="status needs_you">new</span>`}
+        <span class="acts"><button class="br danger" data-delete-for-you="${esc(item.path)}">x</button></span></div>
       <div class="line">${age(item.mtime)}</div>
-    </button>`).join("");
+    </div>`).join("");
 }
 
 async function openForYou(path) {
@@ -419,6 +420,12 @@ $("list-body").addEventListener("click", async (e) => {
   const a = e.target.closest("[data-act]");
   if (a) return runAction(a.dataset.act, a.dataset.id, a.closest(".session-row, .window-name, .pane")?.querySelector(".name"));
   if (editMode) return;
+  const del = e.target.closest("[data-delete-for-you]");
+  if (del) {
+    const name = del.dataset.deleteForYou.split("/").pop();
+    if (confirm(`Delete "${name}"? The file is deleted from the Mac.`) && await act("/api/for-you/delete", { path: del.dataset.deleteForYou })) loadPanes();
+    return;
+  }
   const item = e.target.closest("[data-for-you]");
   if (item) return openForYou(item.dataset.forYou);
   const pane = e.target.closest("[data-pane]"), session = e.target.closest("[data-session]");
