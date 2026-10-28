@@ -158,6 +158,49 @@ def ensure_viewer():
         return fix_viewer()
 
 
+# A window has one size and one layout, shared by the Mac and the phone. When the phone shows a window, tmux shrinks
+# it to the phone's size and squeezes every pane; growing it back does not bring the old pane sizes back. So the Mac's
+# layout, active pane and zoom are kept in window options just before the phone can shrink the window. When the phone
+# shrinks it, @phone_shrunk is set; when a Mac client resizes it after that, the kept layout is put back.
+SAVE_LAYOUT = ("set -wF @phone_layout '#{window_layout}' ; set -wF @phone_active '#{pane_id}' ; "
+               "set -wF @phone_zoomed '#{window_zoomed_flag}'")
+LAYOUT_OPTIONS = ("@phone_layout", "@phone_active", "@phone_zoomed", "@phone_shrunk")
+HOOK = 42  # the index of our hooks in tmux's hook arrays, so we don't replace hooks of the user's own
+
+
+def set_layout_hooks():
+    """tmux runs client-active when a client types after another client did, before the window is resized: the last
+    moment the window still has the Mac's size. By then open_pane has saved the window with the Mac's zoom, so a
+    saved window is not saved again. window-resized runs for each window that changed size."""
+    tmux("set-hook", "-g", f"client-active[{HOOK}]",
+         f"if -F '#{{&&:#{{==:#{{client_session}},{VIEWER}}},#{{==:#{{@phone_layout}},}}}}' {{ {SAVE_LAYOUT} }}")
+    tmux("set-hook", "-g", f"window-resized[{HOOK}]",
+         f"if -F '#{{==:#{{client_session}},{VIEWER}}}' {{ set -w @phone_shrunk 1 }} "
+         f"{{ if -F '#{{@phone_shrunk}}' "
+         f"{{ run-shell -b \"'{sys.executable}' '{Path(__file__).resolve()}' restore '#{{window_id}}'\" }} }}")
+
+
+def save_desktop_layout(window):
+    """For when tmux runs no client-active: the phone attaching, and the phone switching to a window while it is
+    already the active client. A window the phone has not shrunk is saved again, as the Mac may have changed it
+    since an earlier save."""
+    if pane_info(window, "@phone_shrunk") == [""]:
+        values = pane_info(window, "window_layout", "pane_id", "window_zoomed_flag")
+        for option, value in zip(LAYOUT_OPTIONS, values):
+            tmux("set-option", "-w", "-t", window, option, value)
+
+
+def restore_desktop_layout(window):
+    """Put back the Mac's pane sizes, active pane and zoom. Fails if a pane was added or closed since the save."""
+    layout, active, zoomed = pane_info(window, *LAYOUT_OPTIONS[:3])
+    for option in LAYOUT_OPTIONS:
+        tmux("set-option", "-wu", "-t", window, option)
+    tmux("select-layout", "-t", window, layout)  # unzooms first
+    tmux("select-pane", "-t", active)
+    if zoomed == "1":
+        tmux("resize-pane", "-Z", "-t", active)
+
+
 def kill_old_viewer():
     """Before _phone, the viewer was named phone. Kill it if it is grouped with a real session: it only showed that
     session's windows. A phone session standing alone, or grouped only with _phone, holds real work and stays."""
@@ -264,7 +307,9 @@ def open_pane(pane):
     """Show one pane full screen on the phone: switch the phone's session to it, and zoom it if its window is split.
     The window is named through the viewer; a bare %pane could pick the Mac's session and switch the Mac."""
     ensure_viewer()
-    tmux("select-window", "-t", f"={VIEWER}:{pane_info(pane, 'window_id')[0]}")
+    window = pane_info(pane, "window_id")[0]
+    save_desktop_layout(window)
+    tmux("select-window", "-t", f"={VIEWER}:{window}")
     tmux("select-pane", "-t", pane)
     panes, zoomed = pane_info(pane, "window_panes", "window_zoomed_flag")
     if panes != "1" and zoomed == "0":
@@ -681,7 +726,13 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["attach"]:
         # What ttyd runs for each terminal connection: attach to the viewer, made again if it is gone.
         ensure_viewer()
+        set_layout_hooks()
+        save_desktop_layout(pane_info(f"={VIEWER}:", "window_id")[0])
         os.execvp("tmux", ["tmux", "attach", "-t", f"={VIEWER}"])
+    if sys.argv[1:2] == ["restore"]:
+        # What the window-resized hook runs: tmux-phone restore @3
+        restore_desktop_layout(sys.argv[2])
+        sys.exit()
     if not (PUBLIC_ORIGIN and ALLOWED_LOGIN):
         sys.exit("TMUX_PHONE_ORIGIN and TMUX_PHONE_LOGIN must be set; run ./install.sh")
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
