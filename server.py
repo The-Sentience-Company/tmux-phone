@@ -39,6 +39,12 @@ STATIC_FILES = {"/vendor/xterm.js": "text/javascript; charset=utf-8", "/vendor/x
                 "/manifest.json": "application/manifest+json", "/sw.js": "text/javascript; charset=utf-8", "/icon-180.png": "image/png", "/icon-512.png": "image/png"}
 MAX_BODY = 64 * 1024
 MAX_FILE = 2 * 1024 * 1024  # bigger files are not shown on the phone
+# Files the phone shows as an image, video or PDF instead of text, by extension, with the Content-Type they are sent with.
+MEDIA = {".png": ("image", "image/png"), ".jpg": ("image", "image/jpeg"), ".jpeg": ("image", "image/jpeg"),
+         ".gif": ("image", "image/gif"), ".webp": ("image", "image/webp"), ".heic": ("image", "image/heic"),
+         ".heif": ("image", "image/heif"), ".mp4": ("video", "video/mp4"), ".mov": ("video", "video/quicktime"),
+         ".m4v": ("video", "video/x-m4v"), ".pdf": ("pdf", "application/pdf")}
+RAW_CHUNK = 256 * 1024
 MAX_AUDIO = 25 * 1024 * 1024
 MAX_IMAGES = 20 * 1024 * 1024  # all images in one paste, before base64
 UPLOADS = STATE / "uploads"
@@ -434,10 +440,13 @@ def list_folder(path):
 
 
 def read_file(path):
-    """The file's text and its mtime, or a one-line note instead of text for a big, binary or non-UTF-8 file.
+    """The file's text and its mtime; for an image, video or PDF its kind, which the page loads from /api/raw;
+    or a one-line note instead of text for a big, binary or non-UTF-8 file.
     The mtime is a string: nanoseconds don't fit in a JavaScript number."""
     st = os.stat(path)
     out = {"path": path, "mtime": str(st.st_mtime_ns)}
+    if Path(path).suffix.lower() in MEDIA:
+        return {**out, "media": MEDIA[Path(path).suffix.lower()][0]}
     if st.st_size > MAX_FILE:
         return {**out, "note": f"too big to show: {st.st_size / 1024 / 1024:.1f} MB"}
     data = Path(path).read_bytes()
@@ -447,6 +456,22 @@ def read_file(path):
         return {**out, "text": data.decode("utf-8")}
     except UnicodeDecodeError as e:
         return {**out, "note": f"not UTF-8, not shown: {e}"}
+
+
+def byte_range(header, size):
+    """The (start, end) a `Range: bytes=...` header asks for, end included; None for no header; ValueError if unusable."""
+    if not header:
+        return None
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip())
+    if not m or m[1] == m[2] == "":
+        raise ValueError(header)
+    if m[1] == "":
+        start, end = max(size - int(m[2]), 0), size - 1  # bytes=-500 is the last 500 bytes
+    else:
+        start, end = int(m[1]), min(int(m[2]), size - 1) if m[2] else size - 1
+    if start > end:
+        raise ValueError(header)
+    return start, end
 
 
 def write_file(path, text, mtime):
@@ -642,6 +667,40 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_media(self, path):
+        """An image, video or PDF's bytes, or the byte range asked for: iOS Safari plays a video only with ranges.
+        SAMEORIGIN, not DENY, so the page can show a PDF in an iframe."""
+        kind = MEDIA.get(Path(path).suffix.lower())
+        if not kind:
+            return self.reply(415, {"error": "not an image, video or PDF"})
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            try:
+                asked = byte_range(self.headers.get("Range"), size)
+            except ValueError:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                return self.end_headers()
+            start, end = asked or (0, size - 1)
+            self.send_response(206 if asked else 200)
+            self.send_header("Content-Type", kind[1])
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Accept-Ranges", "bytes")
+            if asked:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "SAMEORIGIN")
+            self.end_headers()
+            f.seek(start)
+            left = end - start + 1
+            while left > 0:
+                chunk = f.read(min(RAW_CHUNK, left))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                left -= len(chunk)
+
     def allowed(self, needs_origin):
         login = self.headers.get("Tailscale-User-Login")
         if login != ALLOWED_LOGIN:
@@ -675,13 +734,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {"panes": panes, "sessions": sessions_for_phone(target), "for_you": for_you(),
                                         "version": version(INDEX.read_bytes()), "dictation": DICTATION})
             url = urlsplit(self.path)
-            if url.path in ("/api/files", "/api/file"):
+            if url.path in ("/api/files", "/api/file", "/api/raw"):
                 query = {k: v[0] for k, v in parse_qs(url.query).items()}
                 pane = f"%{query['pane']}" if query.get("pane", "").isdigit() else None
                 if url.path == "/api/file":
                     path = full_path(query.get("path"), pane)
                     mark_seen(path)
                     return self.reply(200, read_file(path))
+                if url.path == "/api/raw":
+                    return self.send_media(full_path(query.get("path"), pane))
                 # With no path, the pane's folder, and the file open in the pane's nvim if there is one.
                 folder = list_folder(full_path(query.get("path"), pane))
                 return self.reply(200, folder if query.get("path") else {**folder, "nvim_file": pane and nvim_file(pane)})
