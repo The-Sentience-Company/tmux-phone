@@ -65,6 +65,7 @@
     background: var(--dim); }
   .pane .top { display: flex; gap: 8px; }
   .pane .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pane.seen .title { color: var(--dim); }
   .pane .line { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pane:active .line { color: inherit; }
   /* Claude Code's state, plain text at the right of the title: not a button, so no brackets. */
@@ -155,6 +156,7 @@
 <section id="list" class="view">
   <header>
     <h1>tmux</h1>
+    <button id="notify" class="hidden">notify</button>
     <button id="theme-open">theme</button>
     <button id="edit">edit</button>
   </header>
@@ -229,7 +231,7 @@ const $ = (id) => document.getElementById(id);
 const STATUS_LABEL = { needs_you: "needs you", working: "working", idle: "idle" };
 let current = null;  // id of the pane open on the phone
 let lastTitle = {};
-let panes = [], sessions = [], editMode = false, renaming = false;  // the list skips its refresh while a name is being typed
+let panes = [], sessions = [], forYou = [], editMode = false, renaming = false;  // the list skips its refresh while a name is being typed
 
 // iOS keeps the layout height when the keyboard opens, and scrolls the page to show the focused input.
 // Undo the scroll and pin the page to what is actually visible above the keyboard and its accessory bar.
@@ -285,6 +287,7 @@ async function loadPanes(poll = false) {
   }
   panes = fresh.panes;
   sessions = fresh.sessions;
+  forYou = fresh.for_you;
   if (fresh.version !== VERSION) reloadWhenSafe();
   $("mic").style.display = fresh.dictation === false ? "none" : "";
   const open = panes.find((p) => p.id === current);
@@ -310,7 +313,7 @@ function renderPanes() {
   const b = (act, id, label, cls = "") => `<button class="br ${cls}" data-act="${act}" data-id="${id}">${label}</button>`;
   const acts = (...buttons) => (editMode ? `<span class="acts">${buttons.join("")}</span>` : "");
   const addWindow = editMode ? `<button class="br primary add-window" data-act="new-window">+ window</button>` : "";
-  const top = renderSessions(b);
+  const top = renderForYou() + renderSessions(b);
   if (!panes.length) {
     $("list-body").innerHTML = `${top}<div class="window-name">No tmux panes. Tap [edit], then [+ window].</div>${addWindow}`;
     return;
@@ -328,6 +331,30 @@ function renderPanes() {
         </div>
         <div class="line">${esc(p.last_line || " ")}</div>
       </${tag}>`).join("")}`).join("") + addWindow;
+}
+
+// Files agents left for Ahmet: the newest five, and every one he has not opened yet, marked new.
+function renderForYou() {
+  if (editMode) return "";
+  const items = forYou.filter((item, n) => n < 5 || !item.seen);
+  if (!items.length) return "";
+  const age = (mtime) => {
+    const m = Math.max(0, Math.round((Date.now() - Number(mtime) / 1e6) / 60000));
+    return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+  };
+  return `<div class="window-name"><span class="name">for you</span></div>` + items.map((item, i) => `
+    <button class="pane${i === items.length - 1 ? " last" : ""}${item.seen ? " seen" : ""}" data-for-you="${esc(item.path)}">
+      <div class="top"><span class="title">${esc(item.name)}</span>${item.seen ? "" : `<span class="status needs_you">new</span>`}</div>
+      <div class="line">${age(item.mtime)}</div>
+    </button>`).join("");
+}
+
+async function openForYou(path) {
+  await openFile(path, null);
+  if (!file) return;
+  filesFromList = true;
+  $("list").classList.add("hidden");
+  $("files").classList.remove("hidden");
 }
 
 // The session row: tap a session to show its windows on the phone. Hidden with one session, outside edit mode.
@@ -385,6 +412,8 @@ $("list-body").addEventListener("click", async (e) => {
   const a = e.target.closest("[data-act]");
   if (a) return runAction(a.dataset.act, a.dataset.id, a.closest(".session-row, .window-name, .pane")?.querySelector(".name"));
   if (editMode) return;
+  const item = e.target.closest("[data-for-you]");
+  if (item) return openForYou(item.dataset.forYou);
   const pane = e.target.closest("[data-pane]"), session = e.target.closest("[data-session]");
   if (pane) openPane(pane.dataset.pane);
   else if (session && !sessions.find((s) => s.id === session.dataset.session).current) sessionAct(`/api/sessions/${session.dataset.session}/switch`);
@@ -825,6 +854,7 @@ $("pane-header").addEventListener("touchend", (e) => {
 // on the file open in the pane's nvim. A file opens read-only, so it scrolls and selects as plain text; [edit] makes
 // it editable, [save] writes it. The save carries the file's mtime from when it was read, and the Mac refuses it
 // if the file changed on disk since.
+let filesFromList = false;  // the file screen was opened from a "for you" row, so back goes to the list
 let folder = null;  // path of the folder shown, or of the open file's folder
 let file = null;    // the open file: { path, mtime, view, editing, changed }
 const editable = new CM.Compartment();
@@ -951,6 +981,13 @@ $("file-edit").addEventListener("click", async () => {
 
 // [‹ back] goes from a file to its folder, and from the folder to the pane. Unsaved changes ask first.
 $("files-back").addEventListener("click", () => {
+  if (filesFromList) {
+    if (file && file.changed && !confirm(`Leave ${file.path.split("/").pop()} without saving? Your changes are lost.`)) return;
+    closeFile();
+    filesFromList = false;
+    $("files").classList.add("hidden");
+    return showList();
+  }
   if (!file) {
     $("files").classList.add("hidden");
     $("pane").classList.remove("hidden");
@@ -1043,6 +1080,31 @@ document.addEventListener("visibilitychange", () => {
 });
 
 // The poll also runs in the pane view, to see a new version.
+// Push: a new "for you" file wakes the service worker, which shows a notification. iOS allows it only on the
+// home-screen app, and asks for permission only on a tap, so [notify] shows until it is granted.
+async function subscribePush() {
+  const reg = await navigator.serviceWorker.register("/sw.js");
+  const { key } = await getJSON("/api/push/key");
+  const raw = Uint8Array.from(atob(key.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+  const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: raw });
+  await post("/api/push/subscribe", { subscription: sub.toJSON() });
+}
+
+if ("serviceWorker" in navigator && "PushManager" in window && "Notification" in window) {
+  if (Notification.permission === "granted") subscribePush().catch((e) => toast(`Notifications are off: ${e.message}`));
+  else if (Notification.permission === "default") $("notify").classList.remove("hidden");
+}
+$("notify").addEventListener("click", async () => {
+  if (await Notification.requestPermission() !== "granted") return toast("Notifications not allowed. Turn them on in Settings.");
+  try { await subscribePush(); $("notify").classList.add("hidden"); toast("Notifications on"); }
+  catch (e) { toast(`Couldn't turn on notifications: ${e.message}`); }
+});
+
+// A tapped notification opens the app at /#for-you=<path>.
+const opened = new URLSearchParams(location.hash.slice(1)).get("for-you");
+if (opened) { history.replaceState(null, "", "/"); openForYou(opened); }
+navigator.serviceWorker?.addEventListener("message", (e) => { if (e.data?.forYou) openForYou(e.data.forYou); });
+
 setInterval(() => { if (!document.hidden) loadPanes(true); }, 3000);
 loadPanes();
 document.body.style.setProperty("--font-size", `${term.options.fontSize}px`);

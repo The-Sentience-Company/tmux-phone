@@ -15,6 +15,8 @@ import threading
 import time
 import traceback
 import unicodedata
+import urllib.error
+import urllib.request
 import uuid
 from http.client import HTTPConnection
 from contextlib import contextmanager
@@ -34,7 +36,7 @@ SERVER_SOURCE = Path(__file__).read_bytes()  # a change to this file needs a res
 # The terminal library, web app manifest and icons the page loads; only these paths are served.
 STATIC_FILES = {"/vendor/xterm.js": "text/javascript; charset=utf-8", "/vendor/xterm.css": "text/css; charset=utf-8",
                 "/vendor/addon-fit.js": "text/javascript; charset=utf-8", "/vendor/codemirror.js": "text/javascript; charset=utf-8",
-                "/manifest.json": "application/manifest+json", "/icon-180.png": "image/png", "/icon-512.png": "image/png"}
+                "/manifest.json": "application/manifest+json", "/sw.js": "text/javascript; charset=utf-8", "/icon-180.png": "image/png", "/icon-512.png": "image/png"}
 MAX_BODY = 64 * 1024
 MAX_FILE = 2 * 1024 * 1024  # bigger files are not shown on the phone
 MAX_AUDIO = 25 * 1024 * 1024
@@ -46,6 +48,11 @@ WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 WHISPER_HOST, WHISPER_PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_WHISPER_PORT", "8767"))
 # Dictation is on if install.sh found whisper-cpp and ffmpeg and downloaded the model; otherwise the page hides the mic.
 DICTATION = WHISPER_MODEL.exists() and bool(shutil.which("whisper-server")) and bool(shutil.which("ffmpeg"))
+# Agents drop screenshots, videos and docs for Ahmet here; the list shows them on top and a new one sends a push.
+FOR_YOU = Path.home() / "notes/sentience/agent-comapny/for-ahmet"
+FOR_YOU_SEEN = STATE / "for-you-seen.json"  # file name -> the mtime it had when opened
+PUSH_SUBSCRIPTIONS = STATE / "push-subscriptions.json"
+VAPID_KEY = STATE / "vapid.pem"
 
 PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|split|paste|key|close|rename)$")
 WINDOW_ROUTE = re.compile(r"^/api/windows/(\d+)/(rename|panes|close)$")  # by window id: 3 is tmux's @3
@@ -497,6 +504,133 @@ def reload_in_nvim(path):
             pass
 
 
+def read_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+
+def write_json(path, value):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(value))
+    tmp.replace(path)
+
+
+def for_you():
+    """The files in FOR_YOU, newest first. A file is seen once opened, until it changes again."""
+    seen = read_json(FOR_YOU_SEEN, {})
+    try:
+        entries = [e for e in os.scandir(FOR_YOU) if e.is_file() and not e.name.startswith(".")]
+    except FileNotFoundError:
+        return []
+    items = [{"name": e.name, "path": e.path, "mtime": str(e.stat().st_mtime_ns)} for e in entries]
+    items.sort(key=lambda i: int(i["mtime"]), reverse=True)
+    return [{**i, "seen": seen.get(i["name"]) == i["mtime"]} for i in items]
+
+
+def mark_seen(path):
+    if Path(path).parent != FOR_YOU:
+        return
+    seen = {i["name"]: i["mtime"] for i in for_you() if i["seen"]}  # drops files that are gone
+    seen[Path(path).name] = str(os.stat(path).st_mtime_ns)
+    write_json(FOR_YOU_SEEN, seen)
+
+
+def b64url(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def openssl(*args, stdin=None):
+    return subprocess.run(["openssl", *args], input=stdin, capture_output=True, check=True, timeout=10).stdout
+
+
+def vapid_public_key():
+    """The server's Web Push key, made on first use: the raw P-256 point the browser subscribes with."""
+    if not VAPID_KEY.exists():
+        openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(VAPID_KEY))
+    return b64url(openssl("ec", "-in", str(VAPID_KEY), "-pubout", "-outform", "DER")[-65:])
+
+
+def vapid_token(endpoint):
+    """An ES256 JWT for the push service at endpoint, signed with the server's key (RFC 8292)."""
+    url = urlsplit(endpoint)
+    claims = {"aud": f"{url.scheme}://{url.netloc}", "exp": int(time.time()) + 12 * 3600, "sub": "https://github.com/The-Sentience-Company/tmux-phone"}
+    signing_input = f"{b64url(json.dumps({'typ': 'JWT', 'alg': 'ES256'}).encode())}.{b64url(json.dumps(claims).encode())}"
+    der = openssl("dgst", "-sha256", "-sign", str(VAPID_KEY), stdin=signing_input.encode())
+    # openssl gives a DER sequence of two integers; JWT wants them as 32 bytes each.
+    r_len = der[3]
+    r, s = der[4:4 + r_len], der[6 + r_len:]
+    return f"{signing_input}.{b64url(int.from_bytes(r, 'big').to_bytes(32, 'big') + int.from_bytes(s, 'big').to_bytes(32, 'big'))}"
+
+
+def add_push_subscription(sub):
+    subs = [s for s in read_json(PUSH_SUBSCRIPTIONS, []) if s["endpoint"] != sub["endpoint"]]
+    write_json(PUSH_SUBSCRIPTIONS, subs + [sub])
+
+
+def send_push():
+    """Wakes each subscribed browser with an empty push; its service worker asks /api/for-you what is new.
+    A subscription the push service no longer knows (404 or 410) is dropped."""
+    key = vapid_public_key()
+    gone = set()
+    for sub in read_json(PUSH_SUBSCRIPTIONS, []):
+        req = urllib.request.Request(sub["endpoint"], data=b"", method="POST", headers={
+            "TTL": "86400", "Urgency": "high", "Authorization": f"vapid t={vapid_token(sub['endpoint'])}, k={key}"})
+        try:
+            urllib.request.urlopen(req, timeout=15).close()
+        except urllib.error.HTTPError as e:
+            print(f"push to {urlsplit(sub['endpoint']).netloc} failed: {e.code} {e.read()[:200]!r}", flush=True)
+            if e.code in (404, 410):
+                gone.add(sub["endpoint"])
+        except OSError as e:
+            print(f"push to {urlsplit(sub['endpoint']).netloc} failed: {e}", flush=True)
+    if gone:
+        write_json(PUSH_SUBSCRIPTIONS, [s for s in read_json(PUSH_SUBSCRIPTIONS, []) if s["endpoint"] not in gone])
+
+
+def notify_mac(name):
+    """A macOS notification from Ghostty (OSC 777), written to each Ghostty tmux client's terminal; a click focuses Ghostty."""
+    for line in tmux("list-clients", "-F", "#{client_termname} #{client_tty}").splitlines():
+        term, _, tty = line.partition(" ")
+        if term == "xterm-ghostty":
+            try:
+                Path(tty).write_text(f"\x1b]777;notify;for you;{name.replace(';', ' ')}\x1b\\")
+            except OSError:
+                pass
+
+
+def watch_for_you():
+    """Sends one push for each new file name in FOR_YOU, once it has stopped changing for 2 s (a big copy is done)."""
+    known = {i["name"] for i in for_you()}
+    while True:
+        time.sleep(3)
+        items = for_you()
+        settled = [i for i in items if i["name"] not in known and time.time() - int(i["mtime"]) / 1e9 > 2]
+        if settled:
+            known |= {i["name"] for i in settled}
+            send_push()
+            for i in settled:
+                notify_mac(i["name"])
+        known &= {i["name"] for i in items}
+
+
+def for_you_popup(args):
+    """What the tmux key runs in a popup: the for-you files in fzf, newest first; Enter opens one with peek.
+    fzf calls back `for-you list` to fill and refresh the list, and `for-you open <path>` to open a file."""
+    if args[:1] == ["list"]:
+        for i in for_you():
+            print(f"{i['path']}\t{'new ' if not i['seen'] else '    '} {i['name']}")
+        return
+    if args[:1] == ["open"]:
+        mark_seen(args[1])
+        subprocess.run(["peek", args[1]])
+        return
+    me = f"{sys.executable} {Path(__file__).resolve()} for-you"
+    subprocess.run(["fzf", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--header", "for you · enter opens · esc closes",
+                    "--bind", f"start:reload({me} list)", "--bind", f"enter:execute({me} open {{1}})+reload({me} list)"])
+
+
 class Handler(BaseHTTPRequestHandler):
     def reply(self, status_code, body, content_type="application/json"):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -531,17 +665,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, page.replace(b"{{VERSION}}", version(page).encode()), "text/html; charset=utf-8")
             if self.path in STATIC_FILES:
                 return self.reply(200, (STATIC / self.path.lstrip("/")).read_bytes(), STATIC_FILES[self.path])
+            if self.path == "/api/for-you":
+                return self.reply(200, {"items": for_you()})
+            if self.path == "/api/push/key":
+                return self.reply(200, {"key": vapid_public_key()})
             if self.path == "/api/panes":
                 target = ensure_viewer()
                 panes = list_panes()
-                return self.reply(200, {"panes": panes, "sessions": sessions_for_phone(target),
+                return self.reply(200, {"panes": panes, "sessions": sessions_for_phone(target), "for_you": for_you(),
                                         "version": version(INDEX.read_bytes()), "dictation": DICTATION})
             url = urlsplit(self.path)
             if url.path in ("/api/files", "/api/file"):
                 query = {k: v[0] for k, v in parse_qs(url.query).items()}
                 pane = f"%{query['pane']}" if query.get("pane", "").isdigit() else None
                 if url.path == "/api/file":
-                    return self.reply(200, read_file(full_path(query.get("path"), pane)))
+                    path = full_path(query.get("path"), pane)
+                    mark_seen(path)
+                    return self.reply(200, read_file(path))
                 # With no path, the pane's folder, and the file open in the pane's nvim if there is one.
                 folder = list_folder(full_path(query.get("path"), pane))
                 return self.reply(200, folder if query.get("path") else {**folder, "nvim_file": pane and nvim_file(pane)})
@@ -585,6 +725,12 @@ class Handler(BaseHTTPRequestHandler):
                 if new_mtime is None:
                     return self.reply(409, {"error": "Not saved: the file changed on disk after you opened it. Go back and open it again."})
                 return self.reply(200, {"mtime": new_mtime})
+            if self.path == "/api/push/subscribe":
+                sub = body.get("subscription") or {}
+                if not (isinstance(sub.get("endpoint"), str) and sub["endpoint"].startswith("https://")):
+                    return self.reply(400, {"error": "bad subscription"})
+                add_push_subscription({"endpoint": sub["endpoint"]})
+                return self.reply(200, {})
             if self.path == "/api/windows":
                 ensure_viewer()  # the new window joins the group, so the Mac has it too
                 return self.reply(200, {"pane": tmux("new-window", "-t", f"={VIEWER}:", "-P", "-F", "#{pane_id}").strip().lstrip("%")})
@@ -748,6 +894,9 @@ if __name__ == "__main__":
         # What the window-resized hook runs: tmux-phone restore @3
         restore_desktop_layout(sys.argv[2])
         sys.exit()
+    if sys.argv[1:2] == ["for-you"]:
+        for_you_popup(sys.argv[2:])
+        sys.exit()
     if not (PUBLIC_ORIGIN and ALLOWED_LOGIN):
         sys.exit("TMUX_PHONE_ORIGIN and TMUX_PHONE_LOGIN must be set; run ./install.sh")
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -756,5 +905,6 @@ if __name__ == "__main__":
     if DICTATION:
         start_whisper()
     keep_awake()
+    threading.Thread(target=watch_for_you, daemon=True).start()
     print(f"tmux-phone on http://{HOST}:{PORT} for {ALLOWED_LOGIN} at {PUBLIC_ORIGIN}", flush=True)
     Server((HOST, PORT), Handler).serve_forever()

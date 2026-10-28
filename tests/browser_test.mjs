@@ -900,6 +900,28 @@ async function main() {
       await page.waitForSelector(`button[data-pane="${paneId}"]`);
     });
 
+    await check("a file in for-ahmet shows on top of the list as new; opening it marks it seen and back returns to the list", async () => {
+      const forYou = path.join(home, "notes/sentience/agent-comapny/for-ahmet");
+      fs.mkdirSync(forYou, { recursive: true });
+      fs.writeFileSync(path.join(forYou, "older-note.txt"), "older\n");
+      fs.utimesSync(path.join(forYou, "older-note.txt"), 1000, 1000);
+      fs.writeFileSync(path.join(forYou, "build-log.txt"), "the build passed\n");
+      const rows = () => page.evaluate(() => [...document.querySelectorAll("[data-for-you]")].map((b) => b.querySelector(".top").textContent.trim()));
+      await waitFor(async () => (await rows()).length === 2, 5000, "two for-you rows");
+      assert(JSON.stringify(await rows()) === JSON.stringify(["build-log.txtnew", "older-note.txtnew"]), `rows: ${JSON.stringify(await rows())}`);
+      const first = await page.evaluate(() => document.querySelector("#list-body").firstElementChild.textContent.trim());
+      assert(first === "for you", `the list starts with ${JSON.stringify(first)}`);
+      await page.tap('[data-for-you$="build-log.txt"]');
+      await waitFor(async () => (await fileText()) === "the build passed\n", 5000, "the file's text");
+      await page.tap("#files-back");
+      await page.waitForSelector("#list:not(.hidden)");
+      assert(await page.locator("#files").isHidden(), "the file screen still shows");
+      await waitFor(async () => JSON.stringify(await rows()) === JSON.stringify(["build-log.txt", "older-note.txtnew"]), 5000,
+        `build-log.txt seen (${JSON.stringify(await rows())})`);
+      fs.rmSync(forYou, { recursive: true });
+      await waitFor(async () => (await rows()).length === 0, 5000, "no for-you rows once the folder is gone");
+    });
+
     await check("one session: no session row, and _phone is never listed", async () => {
       await page.waitForSelector("#list:not(.hidden)");
       assert(!(await page.locator("#sessions").count()), "the session row shows with one session");
