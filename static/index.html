@@ -1067,12 +1067,13 @@ $("file-media").addEventListener("touchstart", (e) => {
   if (!media) return;
   if (e.touches.length === 2) {
     mediaPinch = { gap: fingerGap(e.touches), zoom: media.zoom };
+    lastTap = 0;  // a pinch's first finger is not a tap
   } else if (e.touches.length === 1) {
     if (Date.now() - lastTap < 300) {
       e.preventDefault();
       zoomImage(media.zoom > 1 ? 1 : 2.5, ...inBox(e.touches[0].clientX, e.touches[0].clientY));
-    }
-    lastTap = Date.now();
+      lastTap = 0;
+    } else lastTap = Date.now();
   }
 }, { passive: false });
 $("file-media").addEventListener("touchmove", (e) => {

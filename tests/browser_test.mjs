@@ -187,6 +187,22 @@ async function pinchOut(page, px, selector = ".xterm") {
   }, [px, selector]);
 }
 
+// Two quick taps in the middle of an element, faster than page.tap can do them.
+async function doubleTap(page, selector) {
+  await page.evaluate(async (selector) => {
+    const box = document.querySelector(selector).getBoundingClientRect();
+    const x = box.left + box.width / 2, y = box.top + box.height / 2, target = document.elementFromPoint(x, y);
+    for (let i = 0; i < 2; i++) {
+      const t = document.createTouch(window, target, 1, x, y, x, y);
+      const fire = (type, touches) => target.dispatchEvent(new TouchEvent(type, { touches: document.createTouchList(...touches),
+        changedTouches: document.createTouchList(t), bubbles: true, cancelable: true, composed: true }));
+      fire("touchstart", [t]);
+      fire("touchend", []);
+      await new Promise((r) => setTimeout(r, 80));
+    }
+  }, selector);
+}
+
 async function main() {
   assert(fs.existsSync(MODEL), `whisper model missing at ${MODEL}; run ./install.sh once`);
   fs.symlinkSync(MODEL, path.join(state, "models/ggml-large-v3-turbo-q5_0.bin"));
@@ -673,9 +689,8 @@ async function main() {
       await pinchOut(page, 80, "#file-media");
       const zoomed = await look();
       assert(zoomed.w > fitted.w * 1.5 && zoomed.scrollW > zoomed.boxW, `pinch did not zoom: ${JSON.stringify(zoomed)}`);
-      await page.tap("#file-media img");
-      await page.tap("#file-media img");
-      await waitFor(async () => Math.abs((await look()).w - fitted.w) < 1, 3000, "the image fitted again after a double-tap");
+      await doubleTap(page, "#file-media");
+      await waitFor(async () => Math.abs((await look()).w - fitted.w) < 1, 3000, `the image fitted again after a double-tap (${JSON.stringify(await look())} vs ${JSON.stringify(fitted)}, zoom ${await page.evaluate(() => media.zoom)})`);
       await page.tap("#files-back");
     });
 
@@ -700,6 +715,7 @@ async function main() {
       assert(v.inline && v.controls, `video ${JSON.stringify(v)}`);
       await page.waitForFunction(() => $("file-media").querySelector("video").readyState >= 1, null, { timeout: 10000 });
       await page.tap("#files-back");
+      await page.waitForSelector('#folder:not(.hidden) .entry:text-is("clip.mp4")');
       assert(await page.evaluate(() => !$("file-media").querySelector("video")), "the video is still on the page after [‹ back]");
     });
 
