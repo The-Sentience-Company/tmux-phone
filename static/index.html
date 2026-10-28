@@ -1034,7 +1034,10 @@ function showMedia(kind, src) {
     return box.replaceChildren(file.video);
   }
   const img = Object.assign(document.createElement("img"), { src, alt: file.path.split("/").pop() });
+  $("file-note").textContent = "loading…";
+  $("file-note").classList.remove("hidden");
   img.onload = () => {
+    $("file-note").classList.add("hidden");
     media = { img, fit: Math.min(1, box.clientWidth / img.naturalWidth, box.clientHeight / img.naturalHeight), zoom: 1 };
     zoomImage(1, box.clientWidth / 2, box.clientHeight / 2);
   };
