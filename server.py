@@ -47,7 +47,7 @@ WHISPER_HOST, WHISPER_PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_WHISPER
 # Dictation is on if install.sh found whisper-cpp and ffmpeg and downloaded the model; otherwise the page hides the mic.
 DICTATION = WHISPER_MODEL.exists() and bool(shutil.which("whisper-server")) and bool(shutil.which("ffmpeg"))
 
-PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|paste|key|close|rename)$")
+PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|split|paste|key|close|rename)$")
 WINDOW_ROUTE = re.compile(r"^/api/windows/(\d+)/(rename|panes|close)$")  # by window id: 3 is tmux's @3
 SESSION_ROUTE = re.compile(r"^/api/sessions/(\d+)/(switch|rename|close)$")  # by session id: 3 is tmux's $3
 MAX_NAME = 100
@@ -166,6 +166,9 @@ SAVE_LAYOUT = ("set -wF @phone_layout '#{window_layout}' ; set -wF @phone_active
                "set -wF @phone_zoomed '#{window_zoomed_flag}'")
 LAYOUT_OPTIONS = ("@phone_layout", "@phone_active", "@phone_zoomed", "@phone_shrunk")
 HOOK = 42  # the index of our hooks in tmux's hook arrays, so we don't replace hooks of the user's own
+# The phone shows one pane: zoom its pane in a split window, unless [desktop panes] set @phone_split on the window.
+ZOOM = (f"if -F '#{{&&:#{{==:#{{session_name}},{VIEWER}}},#{{&&:#{{!=:#{{window_panes}},1}},"
+        f"#{{&&:#{{!=:#{{window_zoomed_flag}},1}},#{{!=:#{{@phone_split}},1}}}}}}}}' {{ resize-pane -Z }}")
 
 
 def set_layout_hooks():
@@ -178,6 +181,11 @@ def set_layout_hooks():
          f"if -F '#{{==:#{{client_session}},{VIEWER}}}' {{ set -w @phone_shrunk 1 }} "
          f"{{ if -F '#{{@phone_shrunk}}' "
          f"{{ run-shell -b \"'{sys.executable}' '{Path(__file__).resolve()}' restore '#{{window_id}}'\" }} }}")
+    # Runs after the save above, so the Mac's own zoom is what gets saved. Coming back to the phone resets the toggle.
+    tmux("set-hook", "-g", f"client-active[{HOOK + 1}]", ZOOM)
+    tmux("set-hook", "-g", f"session-window-changed[{HOOK + 1}]", ZOOM)
+    tmux("set-hook", "-g", f"client-attached[{HOOK + 1}]",
+         f"if -F '#{{==:#{{session_name}},{VIEWER}}}' {{ set -wu @phone_split }} ; {ZOOM}")
 
 
 def save_desktop_layout(window):
@@ -309,6 +317,7 @@ def open_pane(pane):
     ensure_viewer()
     window = pane_info(pane, "window_id")[0]
     save_desktop_layout(window)
+    tmux("set-option", "-wu", "-t", window, "@phone_split")
     tmux("select-window", "-t", f"={VIEWER}:{window}")
     tmux("select-pane", "-t", pane)
     panes, zoomed = pane_info(pane, "window_panes", "window_zoomed_flag")
@@ -385,9 +394,15 @@ def version(page):
     return hashlib.sha1(SERVER_SOURCE + page).hexdigest()[:12]
 
 
-def unzoom(pane):
-    if pane_info(pane, "window_zoomed_flag") == ["1"]:
+def toggle_split(pane):
+    """[desktop panes] shows the window split as on the Mac; [one pane] zooms the pane again. Returns True if split."""
+    window = pane_info(pane, "window_id")[0]
+    split = pane_info(window, "@phone_split") != ["1"]
+    tmux("set-option", "-w", "-t", window, "@phone_split", "1" if split else "0")
+    panes, zoomed = pane_info(pane, "window_panes", "window_zoomed_flag")
+    if panes != "1" and zoomed == ("1" if split else "0"):
         tmux("resize-pane", "-Z", "-t", pane)
+    return split
 
 
 # The file screen: folders and text files on the Mac, read and written as UTF-8.
@@ -600,8 +615,8 @@ class Handler(BaseHTTPRequestHandler):
             pane, action = f"%{m[1]}", m[2]
             if action == "open":
                 return self.reply(200, {"ok": True, "border": open_pane(pane)})
-            elif action == "back":
-                unzoom(pane)
+            elif action == "split":
+                return self.reply(200, {"split": toggle_split(pane)})
             elif action == "paste":
                 # Dictated text or photos go into the pane's input; the phone's Enter key submits it.
                 text, images = body.get("text", ""), body.get("images") or []

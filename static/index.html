@@ -162,6 +162,7 @@
   <header id="pane-header">
     <button id="back" aria-label="Back to panes">‹ Panes</button>
     <h1 id="pane-title"></h1>
+    <button id="split">desktop panes</button>
     <button id="files-open">files</button>
     <button id="close-pane" class="danger">Close</button>
   </header>
@@ -434,6 +435,7 @@ async function openPane(id) {
   if (!r) return;
   current = id;
   atBottom();
+  $("split").textContent = "desktop panes";
   $("pane-title").textContent = lastTitle[id] || "";
   $("list").classList.add("hidden");
   $("pane").classList.remove("hidden");
@@ -448,7 +450,6 @@ async function showList() {
   disarm();
   unsent = null;
   setMic(MIC_ICON);
-  if (current) await act(`/api/panes/${current}/back`);
   current = null;
   $("pane").classList.add("hidden");
   $("list").classList.remove("hidden");
@@ -456,6 +457,11 @@ async function showList() {
 }
 
 $("back").addEventListener("click", showList);
+
+$("split").addEventListener("click", async () => {
+  const r = await act(`/api/panes/${current}/split`);
+  if (r) $("split").textContent = r.split ? "one pane" : "desktop panes";
+});
 
 $("close-pane").addEventListener("click", async () => {
   if (!confirm(`Close "${$("pane-title").textContent}"? Anything running in it stops.`)) return;
@@ -676,6 +682,7 @@ function connect() {
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
     retryMs = 1000;
+    $("split").textContent = "desktop panes";  // tmux zooms the pane again on attach
     term.reset();  // tmux redraws the whole screen on attach
     ws.send(encoder.encode(JSON.stringify({ AuthToken: "", columns: term.cols, rows: term.rows })));
   };
@@ -1027,8 +1034,9 @@ $("themes-back").addEventListener("click", () => {
 setTheme(theme);
 
 // iOS drops the connection while the app is in the background; reconnect at once on return.
+// Even an open one, so tmux zooms the pane again if the Mac unzoomed it meanwhile.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && socket && socket.readyState !== WebSocket.OPEN) connect();
+  if (!document.hidden && socket) connect();
 });
 
 // The poll also runs in the pane view, to see a new version.

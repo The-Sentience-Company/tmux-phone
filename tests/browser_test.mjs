@@ -514,7 +514,7 @@ async function main() {
       tmux("send-keys", "-t", pane, `cd '${proj}'; clear`, "Enter");
       await waitFor(() => paneInfo(pane, "pane_current_path") === proj, 5000, `the pane in ${proj} (is ${paneInfo(pane, "pane_current_path")})`);
       const labels = await page.evaluate(() => [...document.querySelectorAll("#pane-header button")].map((b) => b.textContent));
-      assert(JSON.stringify(labels) === JSON.stringify(["‹ Panes", "files", "Close"]), `pane header buttons: ${labels}`);
+      assert(JSON.stringify(labels) === JSON.stringify(["‹ Panes", "desktop panes", "files", "Close"]), `pane header buttons: ${labels}`);
       await page.tap("#files-open");
       await page.waitForSelector("#files:not(.hidden) #folder .entry");
       const got = await entryLabels(), want = ["..", "sub/", ".hidden", "a.txt", "b.py", "Big.log", "nul.dat"];
@@ -775,6 +775,15 @@ async function main() {
       added = await page.evaluate(() => current);
       assert(added && added !== paneId, `the phone shows pane ${added}`);
       assert(tmux("display-message", "-p", "-t", "test", "#{pane_id}").trim() === `%${added}`, "tmux's active pane is not the new one");
+    });
+
+    await check("a pane in a split window opens zoomed; [desktop panes] shows the split, [one pane] zooms back", async () => {
+      const zoomed = () => paneInfo(`%${added}`, "window_zoomed_flag");
+      assert(zoomed() === "1", "the new pane is not zoomed");
+      await page.tap("#split");
+      await waitFor(async () => zoomed() === "0" && await page.textContent("#split") === "one pane", 5000, "the split view");
+      await page.tap("#split");
+      await waitFor(async () => zoomed() === "1" && await page.textContent("#split") === "desktop panes", 5000, "one pane again");
     });
 
     await check("[x] on a pane closes it after a confirm", async () => {
