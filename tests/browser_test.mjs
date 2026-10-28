@@ -642,6 +642,78 @@ async function main() {
       await page.waitForSelector("#pane:not(.hidden)");
     });
 
+    // A 400x800 image, a one-second video, a one-page PDF and a HEIC photo, made with the Mac's own tools.
+    const media = path.join(proj, "media");
+    fs.mkdirSync(media);
+    fs.writeFileSync(path.join(media, "dot.png"), Buffer.from(PNG_B64, "base64"));
+    execFileSync("sips", ["-z", "800", "400", path.join(media, "dot.png"), "--out", path.join(media, "shot.png")], { stdio: "ignore" });
+    execFileSync("sips", ["-s", "format", "heic", path.join(media, "shot.png"), "--out", path.join(media, "photo.heic")], { stdio: "ignore" });
+    execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10", "-t", "1", "-pix_fmt", "yuv420p",
+                            "-movflags", "+faststart", path.join(media, "clip.mp4")]);
+    fs.writeFileSync(path.join(media, "doc.pdf"), "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n" +
+      "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n" +
+      "trailer<</Root 1 0 R>>\n%%EOF\n");
+    const raw = (file, headers = {}) => fetch(`http://127.0.0.1:${port}/api/raw?path=${encodeURIComponent(path.join(media, file))}`,
+                                              { headers: { "Tailscale-User-Login": LOGIN, ...headers } });
+
+    await check("an image opens fitted to the screen; pinch zooms it so it scrolls; double-tap fits it again", async () => {
+      await page.tap("#files-open");
+      await tapEntry("media/");
+      await tapEntry("shot.png");
+      await page.waitForFunction(() => document.querySelector("#file-media img")?.complete && media);
+      const look = () => page.evaluate(() => {
+        const box = $("file-media"), img = box.querySelector("img").getBoundingClientRect(), b = box.getBoundingClientRect();
+        return { w: img.width, h: img.height, boxW: b.width, boxH: b.height, scrollW: box.scrollWidth, title: $("files-title").textContent,
+                 edit: !$("file-edit").classList.contains("hidden") };
+      });
+      const fitted = await look();
+      assert(fitted.title === "shot.png" && !fitted.edit, `header: ${JSON.stringify(fitted)}`);
+      assert(fitted.h <= fitted.boxH + 0.5 && fitted.w <= fitted.boxW + 0.5 && Math.abs(fitted.h / fitted.w - 2) < 0.02,
+             `not fitted: ${JSON.stringify(fitted)}`);
+      await pinchOut(page, 80, "#file-media");
+      const zoomed = await look();
+      assert(zoomed.w > fitted.w * 1.5 && zoomed.scrollW > zoomed.boxW, `pinch did not zoom: ${JSON.stringify(zoomed)}`);
+      await page.tap("#file-media img");
+      await page.tap("#file-media img");
+      await waitFor(async () => Math.abs((await look()).w - fitted.w) < 1, 3000, "the image fitted again after a double-tap");
+      await page.tap("#files-back");
+    });
+
+    await check("a HEIC photo is sent as a JPEG, so every browser shows it", async () => {
+      const r = await raw("photo.heic");
+      const head = Buffer.from(await r.arrayBuffer()).subarray(0, 3);
+      assert(r.status === 200 && r.headers.get("content-type") === "image/jpeg" && head.equals(Buffer.from([0xff, 0xd8, 0xff])),
+             `got ${r.status} ${r.headers.get("content-type")} ${head.toString("hex")}`);
+      await tapEntry("photo.heic");
+      await page.waitForFunction(() => document.querySelector("#file-media img")?.naturalWidth === 400);
+      await page.tap("#files-back");
+    });
+
+    await check("a video plays inline, loaded in byte ranges", async () => {
+      const r = await raw("clip.mp4", { Range: "bytes=0-9" });
+      assert(r.status === 206 && r.headers.get("content-range") === `bytes 0-9/${fs.statSync(path.join(media, "clip.mp4")).size}` &&
+             (await r.arrayBuffer()).byteLength === 10, `range answer ${r.status} ${r.headers.get("content-range")}`);
+      assert((await raw("clip.mp4", { Range: "bytes=999999999-" })).status === 416, "a range past the end is not 416");
+      await tapEntry("clip.mp4");
+      await page.waitForSelector("#file-media video");
+      const v = await page.evaluate(() => { const v = $("file-media").querySelector("video"); return { inline: v.playsInline, controls: v.controls }; });
+      assert(v.inline && v.controls, `video ${JSON.stringify(v)}`);
+      await page.waitForFunction(() => $("file-media").querySelector("video").readyState >= 1, null, { timeout: 10000 });
+      await page.tap("#files-back");
+      assert(await page.evaluate(() => !$("file-media").querySelector("video")), "the video is still on the page after [‹ back]");
+    });
+
+    await check("a PDF shows in a frame the server allows", async () => {
+      const r = await raw("doc.pdf");
+      assert(r.headers.get("content-type") === "application/pdf" && r.headers.get("x-frame-options") === "SAMEORIGIN",
+             `${r.headers.get("content-type")} ${r.headers.get("x-frame-options")}`);
+      await tapEntry("doc.pdf");
+      await page.waitForSelector("#file-media:not(.hidden) iframe");
+      await page.tap("#files-back");
+      await page.tap("#files-back");
+      await page.waitForSelector("#pane:not(.hidden)");
+    });
+
     await check("the save route checks the Origin, like every POST", async () => {
       const r = await fetch(`http://127.0.0.1:${port}/api/file`, { method: "POST",
         headers: { "Tailscale-User-Login": LOGIN, Origin: "https://evil.example", "Content-Type": "application/json" },

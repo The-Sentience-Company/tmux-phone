@@ -129,6 +129,11 @@
   .entry.folder { color: var(--cyan); }
   #file-note { padding: 8px; color: var(--dim); }
   #file-body { flex: 1; min-height: 0; }
+  /* An image, video or PDF. The image is sized by its zoom and scrolls inside the box; auto margins center it. */
+  #file-media { flex: 1; min-height: 0; display: flex; overflow: auto; -webkit-overflow-scrolling: touch; }
+  #file-media img, #file-media video { margin: auto; display: block; }
+  #file-media video { max-width: 100%; max-height: 100%; }
+  #file-media iframe { flex: 1; border: 0; background: #fff; }
   #file-body .cm-editor { height: 100%; background: var(--bg); color: var(--fg); font-size: var(--font-size, 13px); }
   #file-body .cm-editor.cm-focused { outline: none; }
   #file-body .cm-scroller { font-family: var(--font); line-height: 1.4; -webkit-overflow-scrolling: touch; }
@@ -209,6 +214,7 @@
   <div id="folder"></div>
   <div id="file-note" class="hidden"></div>
   <div id="file-body" class="hidden"></div>
+  <div id="file-media" class="hidden"></div>
 </section>
 
 <section id="themes" class="view hidden">
@@ -455,7 +461,7 @@ $("edit").addEventListener("click", () => {
 const VERSION = document.querySelector('meta[name="version"]').content, PANE_KEY = "tmux-phone.pane", FILES_KEY = "tmux-phone.files";
 function reloadWhenSafe() {
   if (recorder || unsent || $("mic").disabled || $("attach").disabled || $("paste").disabled || renaming) return;
-  if (file && file.changed) return;
+  if (file && (file.changed || (file.video && !file.video.paused))) return;
   try {
     if (current) sessionStorage.setItem(PANE_KEY, current);
     if (current && !$("files").classList.contains("hidden")) sessionStorage.setItem(FILES_KEY, JSON.stringify({ folder, file: file && file.path }));
@@ -907,7 +913,8 @@ $("folder").addEventListener("click", (e) => {
   else openFile(row.dataset.path, folder);
 });
 
-// A big, binary or non-UTF-8 file comes back as a one-line note instead of its text.
+// A big, binary or non-UTF-8 file comes back as a one-line note instead of its text. An image, video or PDF
+// comes back as its kind, and its bytes load from /api/raw.
 async function openFile(path, from) {
   let data;
   try { data = await getJSON(`/api/file?path=${encodeURIComponent(path)}`); } catch (e) { return toast(e.message); }
@@ -922,6 +929,7 @@ async function openFile(path, from) {
     $("file-note").classList.remove("hidden");
     return;
   }
+  if (data.media) return showMedia(data.media, `/api/raw?path=${encodeURIComponent(data.path)}&v=${data.mtime}`);
   $("file-body").classList.remove("hidden");
   file.view = new CM.EditorView({
     parent: $("file-body"),
@@ -944,6 +952,8 @@ function closeFile() {
   if (file && file.view) file.view.destroy();
   file = null;
   $("file-body").classList.add("hidden");
+  $("file-media").classList.add("hidden");
+  $("file-media").replaceChildren();  // stops a video
   $("file-note").classList.add("hidden");
   $("file-edit").classList.add("hidden");
 }
@@ -1010,6 +1020,75 @@ $("file-body").addEventListener("touchmove", (e) => {
   setFontSize(Math.round(filePinch.size * fingerGap(e.touches) / filePinch.gap));
 }, { passive: false });
 $("file-body").addEventListener("touchend", (e) => { if (e.touches.length < 2) filePinch = null; }, { passive: true });
+
+// An image starts fitted to the screen. Pinch or double-tap zooms it about the fingers, up to 8x; it then scrolls like any page. A video plays inline. A PDF shows in the browser's own viewer.
+const MAX_ZOOM = 8;
+let media = null;  // the open image: { img, fit, zoom }, fit being the scale that fits it on screen
+function showMedia(kind, src) {
+  const box = $("file-media");
+  box.classList.remove("hidden");
+  if (kind === "pdf") return box.replaceChildren(Object.assign(document.createElement("iframe"), { src, title: file.path }));
+  if (kind === "video") {
+    file.video = Object.assign(document.createElement("video"), { src, controls: true, playsInline: true, preload: "metadata" });
+    file.video.onerror = () => mediaFailed("video");
+    return box.replaceChildren(file.video);
+  }
+  const img = Object.assign(document.createElement("img"), { src, alt: file.path.split("/").pop() });
+  img.onload = () => {
+    media = { img, fit: Math.min(1, box.clientWidth / img.naturalWidth, box.clientHeight / img.naturalHeight), zoom: 1 };
+    zoomImage(1, box.clientWidth / 2, box.clientHeight / 2);
+  };
+  img.onerror = () => mediaFailed("image");
+  media = null;
+  box.replaceChildren(img);
+}
+
+function mediaFailed(kind) {
+  $("file-media").classList.add("hidden");
+  $("file-note").textContent = `This ${kind} could not be shown here.`;
+  $("file-note").classList.remove("hidden");
+}
+
+// Keeps the image point under (x, y), in the box's own coordinates, under it after the zoom.
+function zoomImage(zoom, x, y) {
+  const box = $("file-media"), { img } = media, old = img.getBoundingClientRect(), b = box.getBoundingClientRect();
+  const u = (x + b.left - old.left) / (old.width || 1), v = (y + b.top - old.top) / (old.height || 1);
+  media.zoom = Math.min(MAX_ZOOM, Math.max(1, zoom));
+  img.style.width = `${img.naturalWidth * media.fit * media.zoom}px`;
+  img.style.height = `${img.naturalHeight * media.fit * media.zoom}px`;
+  const now = img.getBoundingClientRect();
+  box.scrollLeft += now.left + u * now.width - b.left - x;
+  box.scrollTop += now.top + v * now.height - b.top - y;
+}
+
+const inBox = (x, y) => { const b = $("file-media").getBoundingClientRect(); return [x - b.left, y - b.top]; };
+let mediaPinch = null, lastTap = 0;
+$("file-media").addEventListener("touchstart", (e) => {
+  if (!media) return;
+  if (e.touches.length === 2) {
+    mediaPinch = { gap: fingerGap(e.touches), zoom: media.zoom };
+  } else if (e.touches.length === 1) {
+    if (Date.now() - lastTap < 300) {
+      e.preventDefault();
+      zoomImage(media.zoom > 1 ? 1 : 2.5, ...inBox(e.touches[0].clientX, e.touches[0].clientY));
+    }
+    lastTap = Date.now();
+  }
+}, { passive: false });
+$("file-media").addEventListener("touchmove", (e) => {
+  if (!mediaPinch || e.touches.length !== 2) return;
+  e.preventDefault();
+  const [t, u] = e.touches;
+  zoomImage(mediaPinch.zoom * fingerGap(e.touches) / mediaPinch.gap, ...inBox((t.clientX + u.clientX) / 2, (t.clientY + u.clientY) / 2));
+}, { passive: false });
+$("file-media").addEventListener("touchend", (e) => { if (e.touches.length < 2) mediaPinch = null; }, { passive: true });
+// Turning the phone fits the image again.
+window.addEventListener("resize", () => {
+  if (!media || $("file-media").classList.contains("hidden")) return;
+  const box = $("file-media"), { img } = media;
+  media.fit = Math.min(1, box.clientWidth / img.naturalWidth, box.clientHeight / img.naturalHeight);
+  zoomImage(media.zoom, box.clientWidth / 2, box.clientHeight / 2);
+});
 
 // A theme colors the terminal's 16 colors and the page around it. It is kept in this browser, like the font size.
 // Each is: background, foreground, selection, then colors 0-15. Colors are from Ghostty's themes, the Cursor ones

@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -41,8 +42,8 @@ MAX_BODY = 64 * 1024
 MAX_FILE = 2 * 1024 * 1024  # bigger files are not shown on the phone
 # Files the phone shows as an image, video or PDF instead of text, by extension, with the Content-Type they are sent with.
 MEDIA = {".png": ("image", "image/png"), ".jpg": ("image", "image/jpeg"), ".jpeg": ("image", "image/jpeg"),
-         ".gif": ("image", "image/gif"), ".webp": ("image", "image/webp"), ".heic": ("image", "image/heic"),
-         ".heif": ("image", "image/heif"), ".mp4": ("video", "video/mp4"), ".mov": ("video", "video/quicktime"),
+         ".gif": ("image", "image/gif"), ".webp": ("image", "image/webp"), ".heic": ("image", "image/jpeg"),
+         ".heif": ("image", "image/jpeg"), ".mp4": ("video", "video/mp4"), ".mov": ("video", "video/quicktime"),
          ".m4v": ("video", "video/x-m4v"), ".pdf": ("pdf", "application/pdf")}
 RAW_CHUNK = 256 * 1024
 MAX_AUDIO = 25 * 1024 * 1024
@@ -673,6 +674,15 @@ class Handler(BaseHTTPRequestHandler):
         kind = MEDIA.get(Path(path).suffix.lower())
         if not kind:
             return self.reply(415, {"error": "not an image, video or PDF"})
+        if Path(path).suffix.lower() in (".heic", ".heif"):
+            # Only Safari shows HEIC, so the Mac's sips sends it as a JPEG.
+            with tempfile.TemporaryDirectory() as d:
+                jpeg = os.path.join(d, "image.jpg")
+                subprocess.run(["sips", "-s", "format", "jpeg", path, "--out", jpeg], capture_output=True, check=True, timeout=30)
+                return self.send_media_bytes(jpeg, kind[1])
+        self.send_media_bytes(path, kind[1])
+
+    def send_media_bytes(self, path, content_type):
         with open(path, "rb") as f:
             size = os.fstat(f.fileno()).st_size
             try:
@@ -684,7 +694,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.end_headers()
             start, end = asked or (0, size - 1)
             self.send_response(206 if asked else 200)
-            self.send_header("Content-Type", kind[1])
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(end - start + 1))
             self.send_header("Accept-Ranges", "bytes")
             if asked:
