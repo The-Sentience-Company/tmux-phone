@@ -147,7 +147,8 @@ def main():
         assert status == 200, f"{status}: {body[:200]!r}"
         text = json.loads(body)["text"].lower()
         assert "quick brown fox" in text, f"got {text!r}"
-    check("dictation returns the spoken words", dictation)
+    if json.loads(request("/api/panes")[1])["dictation"]:
+        check("dictation returns the spoken words", dictation)
 
     def other_sites_blocked():
         # Pane 0 needn't exist: the origin is refused before anything reaches tmux.

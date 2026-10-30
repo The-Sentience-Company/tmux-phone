@@ -49,6 +49,9 @@
   header { display: flex; align-items: center; padding: 0 2px; border-bottom: 1px solid var(--line); }
   header h1 { font-size: inherit; color: var(--green); margin: 0 6px; flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The pane's buttons fill the first row, so its title gets a row of its own below them. */
+  #pane-header { flex-wrap: wrap; }
+  #pane-title { order: 1; flex-basis: 100%; padding-bottom: 2px; }
 
   #list-body { flex: 1; overflow-y: auto; }
   /* Each window's panes hang under it as a tree: ├─ for each pane but the last, └─ for the last, and a dim line
@@ -62,6 +65,7 @@
     background: var(--dim); }
   .pane .top { display: flex; gap: 8px; }
   .pane .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pane.seen .title { color: var(--dim); }
   .pane .line { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pane:active .line { color: inherit; }
   /* Claude Code's state, plain text at the right of the title: not a button, so no brackets. */
@@ -125,6 +129,11 @@
   .entry.folder { color: var(--cyan); }
   #file-note { padding: 8px; color: var(--dim); }
   #file-body { flex: 1; min-height: 0; }
+  /* An image, video or PDF. The image is sized by its zoom and scrolls inside the box; auto margins center it. */
+  #file-media { flex: 1; min-height: 0; display: flex; overflow: auto; -webkit-overflow-scrolling: touch; }
+  #file-media img, #file-media video { margin: auto; display: block; }
+  #file-media video { max-width: 100%; max-height: 100%; }
+  #file-media iframe { flex: 1; border: 0; background: #fff; }
   #file-body .cm-editor { height: 100%; background: var(--bg); color: var(--fg); font-size: var(--font-size, 13px); }
   #file-body .cm-editor.cm-focused { outline: none; }
   #file-body .cm-scroller { font-family: var(--font); line-height: 1.4; -webkit-overflow-scrolling: touch; }
@@ -152,6 +161,7 @@
 <section id="list" class="view">
   <header>
     <h1>tmux</h1>
+    <button id="notify" class="hidden">notify</button>
     <button id="theme-open">theme</button>
     <button id="edit">edit</button>
   </header>
@@ -162,6 +172,7 @@
   <header id="pane-header">
     <button id="back" aria-label="Back to panes">‹ Panes</button>
     <h1 id="pane-title"></h1>
+    <button id="split">desktop panes</button>
     <button id="files-open">files</button>
     <button id="close-pane" class="danger">Close</button>
   </header>
@@ -177,6 +188,7 @@
     <span class="sep" aria-hidden="true">│</span>
     <button data-mod="ctrl" class="mod">ctrl</button>
     <button data-mod="alt" class="mod">alt</button>
+    <button data-key="tab">tab</button>
     <span class="sep" aria-hidden="true">│</span>
     <button data-key="escape">esc</button>
     <button data-key="up">↑</button>
@@ -186,7 +198,6 @@
     <button data-key="1">1</button>
     <button data-key="2">2</button>
     <button data-key="3">3</button>
-    <button data-key="tab">tab</button>
     <button data-key="shift+tab">shift-tab</button>
     <button data-key="ctrl+c" class="danger">ctrl-c</button>
     <button data-key="alt+p">model</button>
@@ -203,6 +214,7 @@
   <div id="folder"></div>
   <div id="file-note" class="hidden"></div>
   <div id="file-body" class="hidden"></div>
+  <div id="file-media" class="hidden"></div>
 </section>
 
 <section id="themes" class="view hidden">
@@ -225,7 +237,7 @@ const $ = (id) => document.getElementById(id);
 const STATUS_LABEL = { needs_you: "needs you", working: "working", idle: "idle" };
 let current = null;  // id of the pane open on the phone
 let lastTitle = {};
-let panes = [], sessions = [], editMode = false, renaming = false;  // the list skips its refresh while a name is being typed
+let panes = [], sessions = [], forYou = [], editMode = false, renaming = false;  // the list skips its refresh while a name is being typed
 
 // iOS keeps the layout height when the keyboard opens, and scrolls the page to show the focused input.
 // Undo the scroll and pin the page to what is actually visible above the keyboard and its accessory bar.
@@ -270,6 +282,7 @@ function esc(s) {
 // A poll in edit mode keeps the data but does not redraw, so a tap is never lost to a redraw mid-press.
 async function loadPanes(poll = false) {
   if (renaming) return;
+  const asked = current;
   let fresh;
   try {
     const r = await fetch("/api/panes");
@@ -281,10 +294,18 @@ async function loadPanes(poll = false) {
   }
   panes = fresh.panes;
   sessions = fresh.sessions;
+  forYou = fresh.for_you;
   if (fresh.version !== VERSION) reloadWhenSafe();
+  $("mic").style.display = fresh.dictation === false ? "none" : "";
+  for (const p of panes) lastTitle[p.id] = p.title || p.command;
+  // Keys, pastes and Close go to the pane the terminal shows, which the Mac or another phone tab may have changed.
+  // A poll sent before a pane was opened carries the old pane, so only adopt if current did not change meanwhile.
+  if (current && current === asked && fresh.shown && fresh.shown !== current) {
+    current = fresh.shown;
+    $("pane-title").textContent = lastTitle[current] || "";
+  }
   const open = panes.find((p) => p.id === current);
   if (open) hideBorderRow(open.border);
-  for (const p of panes) lastTitle[p.id] = p.title || p.command;
   renderStrip();
   if (!renaming && !(poll && editMode)) renderPanes();
 }
@@ -305,7 +326,7 @@ function renderPanes() {
   const b = (act, id, label, cls = "") => `<button class="br ${cls}" data-act="${act}" data-id="${id}">${label}</button>`;
   const acts = (...buttons) => (editMode ? `<span class="acts">${buttons.join("")}</span>` : "");
   const addWindow = editMode ? `<button class="br primary add-window" data-act="new-window">+ window</button>` : "";
-  const top = renderSessions(b);
+  const top = renderForYou() + renderSessions(b);
   if (!panes.length) {
     $("list-body").innerHTML = `${top}<div class="window-name">No tmux panes. Tap [edit], then [+ window].</div>${addWindow}`;
     return;
@@ -323,6 +344,32 @@ function renderPanes() {
         </div>
         <div class="line">${esc(p.last_line || " ")}</div>
       </${tag}>`).join("")}`).join("") + addWindow;
+}
+
+// Files agents left for Ahmet: the newest five, and every one he has not opened yet, marked new.
+function renderForYou() {
+  if (editMode) return "";
+  const items = forYou.filter((item, n) => n < 5 || !item.seen);
+  if (!items.length) return "";
+  const age = (mtime) => {
+    const m = Math.max(0, Math.round((Date.now() - Number(mtime) / 1e6) / 60000));
+    return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+  };
+  return `<div class="window-name"><span class="name">for you</span></div>` + items.map((item, i) => `
+    <div class="pane${i === items.length - 1 ? " last" : ""}${item.seen ? " seen" : ""}" data-for-you="${esc(item.path)}">
+      <div class="top"><span class="title">${esc(item.name)}</span>${item.seen ? "" : `<span class="status needs_you">new</span>`}
+        <span class="acts"><button class="br danger" data-delete-for-you="${esc(item.path)}">x</button></span></div>
+      <div class="line">${age(item.mtime)}</div>
+    </div>`).join("");
+}
+
+async function openForYou(path) {
+  await openFile(path, null);
+  if (!file) return;
+  filesFromList = true;
+  $("list").classList.add("hidden");
+  $("pane").classList.add("hidden");  // a tapped notification can arrive while a pane is open
+  $("files").classList.remove("hidden");
 }
 
 // The session row: tap a session to show its windows on the phone. Hidden with one session, outside edit mode.
@@ -380,6 +427,14 @@ $("list-body").addEventListener("click", async (e) => {
   const a = e.target.closest("[data-act]");
   if (a) return runAction(a.dataset.act, a.dataset.id, a.closest(".session-row, .window-name, .pane")?.querySelector(".name"));
   if (editMode) return;
+  const del = e.target.closest("[data-delete-for-you]");
+  if (del) {
+    const name = del.dataset.deleteForYou.split("/").pop();
+    if (confirm(`Delete "${name}"? The file is deleted from the Mac.`) && await act("/api/for-you/delete", { path: del.dataset.deleteForYou })) loadPanes();
+    return;
+  }
+  const item = e.target.closest("[data-for-you]");
+  if (item) return openForYou(item.dataset.forYou);
   const pane = e.target.closest("[data-pane]"), session = e.target.closest("[data-session]");
   if (pane) openPane(pane.dataset.pane);
   else if (session && !sessions.find((s) => s.id === session.dataset.session).current) sessionAct(`/api/sessions/${session.dataset.session}/switch`);
@@ -420,7 +475,7 @@ $("edit").addEventListener("click", () => {
 const VERSION = document.querySelector('meta[name="version"]').content, PANE_KEY = "tmux-phone.pane", FILES_KEY = "tmux-phone.files";
 function reloadWhenSafe() {
   if (recorder || unsent || $("mic").disabled || $("attach").disabled || $("paste").disabled || renaming) return;
-  if (file && file.changed) return;
+  if (file && (file.changed || (file.video && !file.video.paused))) return;
   try {
     if (current) sessionStorage.setItem(PANE_KEY, current);
     if (current && !$("files").classList.contains("hidden")) sessionStorage.setItem(FILES_KEY, JSON.stringify({ folder, file: file && file.path }));
@@ -433,6 +488,7 @@ async function openPane(id) {
   if (!r) return;
   current = id;
   atBottom();
+  $("split").textContent = "desktop panes";
   $("pane-title").textContent = lastTitle[id] || "";
   $("list").classList.add("hidden");
   $("pane").classList.remove("hidden");
@@ -447,7 +503,6 @@ async function showList() {
   disarm();
   unsent = null;
   setMic(MIC_ICON);
-  if (current) await act(`/api/panes/${current}/back`);
   current = null;
   $("pane").classList.add("hidden");
   $("list").classList.remove("hidden");
@@ -456,9 +511,18 @@ async function showList() {
 
 $("back").addEventListener("click", showList);
 
+$("split").addEventListener("click", async () => {
+  const r = await act(`/api/panes/${current}/split`);
+  if (r) $("split").textContent = r.split ? "one pane" : "desktop panes";
+});
+
 $("close-pane").addEventListener("click", async () => {
-  if (!confirm(`Close "${$("pane-title").textContent}"? Anything running in it stops.`)) return;
-  if (await act(`/api/panes/${current}/close`)) { current = null; showList(); }
+  await loadPanes();
+  const pane = current;
+  if (!pane || !confirm(`Close "${$("pane-title").textContent}"? Anything running in it stops.`)) return;
+  await loadPanes();
+  if (current !== pane) return toast("The phone now shows another pane, so nothing was closed.");
+  if (await act(`/api/panes/${pane}/close`)) { current = null; showList(); }
 });
 
 document.querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click", () => {
@@ -675,6 +739,7 @@ function connect() {
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
     retryMs = 1000;
+    $("split").textContent = "desktop panes";  // tmux zooms the pane again on attach
     term.reset();  // tmux redraws the whole screen on attach
     ws.send(encoder.encode(JSON.stringify({ AuthToken: "", columns: term.cols, rows: term.rows })));
   };
@@ -814,6 +879,7 @@ $("pane-header").addEventListener("touchend", (e) => {
 // on the file open in the pane's nvim. A file opens read-only, so it scrolls and selects as plain text; [edit] makes
 // it editable, [save] writes it. The save carries the file's mtime from when it was read, and the Mac refuses it
 // if the file changed on disk since.
+let filesFromList = false;  // the file screen was opened from a "for you" row, so back goes to the list
 let folder = null;  // path of the folder shown, or of the open file's folder
 let file = null;    // the open file: { path, mtime, view, editing, changed }
 const editable = new CM.Compartment();
@@ -865,7 +931,8 @@ $("folder").addEventListener("click", (e) => {
   else openFile(row.dataset.path, folder);
 });
 
-// A big, binary or non-UTF-8 file comes back as a one-line note instead of its text.
+// A big, binary or non-UTF-8 file comes back as a one-line note instead of its text. An image, video or PDF
+// comes back as its kind, and its bytes load from /api/raw.
 async function openFile(path, from) {
   let data;
   try { data = await getJSON(`/api/file?path=${encodeURIComponent(path)}`); } catch (e) { return toast(e.message); }
@@ -880,6 +947,7 @@ async function openFile(path, from) {
     $("file-note").classList.remove("hidden");
     return;
   }
+  if (data.media) return showMedia(data.media, `/api/raw?path=${encodeURIComponent(data.path)}&v=${data.mtime}`);
   $("file-body").classList.remove("hidden");
   file.view = new CM.EditorView({
     parent: $("file-body"),
@@ -902,6 +970,8 @@ function closeFile() {
   if (file && file.view) file.view.destroy();
   file = null;
   $("file-body").classList.add("hidden");
+  $("file-media").classList.add("hidden");
+  $("file-media").replaceChildren();  // stops a video
   $("file-note").classList.add("hidden");
   $("file-edit").classList.add("hidden");
 }
@@ -940,6 +1010,13 @@ $("file-edit").addEventListener("click", async () => {
 
 // [‹ back] goes from a file to its folder, and from the folder to the pane. Unsaved changes ask first.
 $("files-back").addEventListener("click", () => {
+  if (filesFromList) {
+    if (file && file.changed && !confirm(`Leave ${file.path.split("/").pop()} without saving? Your changes are lost.`)) return;
+    closeFile();
+    filesFromList = false;
+    $("files").classList.add("hidden");
+    return showList();
+  }
   if (!file) {
     $("files").classList.add("hidden");
     $("pane").classList.remove("hidden");
@@ -961,6 +1038,79 @@ $("file-body").addEventListener("touchmove", (e) => {
   setFontSize(Math.round(filePinch.size * fingerGap(e.touches) / filePinch.gap));
 }, { passive: false });
 $("file-body").addEventListener("touchend", (e) => { if (e.touches.length < 2) filePinch = null; }, { passive: true });
+
+// An image starts fitted to the screen. Pinch or double-tap zooms it about the fingers, up to 8x; it then scrolls like any page. A video plays inline. A PDF shows in the browser's own viewer.
+const MAX_ZOOM = 8;
+let media = null;  // the open image: { img, fit, zoom }, fit being the scale that fits it on screen
+function showMedia(kind, src) {
+  const box = $("file-media");
+  box.classList.remove("hidden");
+  if (kind === "pdf") return box.replaceChildren(Object.assign(document.createElement("iframe"), { src, title: file.path }));
+  if (kind === "video") {
+    file.video = Object.assign(document.createElement("video"), { src, controls: true, playsInline: true, preload: "metadata" });
+    file.video.onerror = () => mediaFailed("video");
+    return box.replaceChildren(file.video);
+  }
+  const img = Object.assign(document.createElement("img"), { src, alt: file.path.split("/").pop() });
+  $("file-note").textContent = "loading…";
+  $("file-note").classList.remove("hidden");
+  img.onload = () => {
+    $("file-note").classList.add("hidden");
+    media = { img, fit: Math.min(1, box.clientWidth / img.naturalWidth, box.clientHeight / img.naturalHeight), zoom: 1 };
+    zoomImage(1, box.clientWidth / 2, box.clientHeight / 2);
+  };
+  img.onerror = () => mediaFailed("image");
+  media = null;
+  box.replaceChildren(img);
+}
+
+function mediaFailed(kind) {
+  $("file-media").classList.add("hidden");
+  $("file-note").textContent = `This ${kind} could not be shown here.`;
+  $("file-note").classList.remove("hidden");
+}
+
+// Keeps the image point under (x, y), in the box's own coordinates, under it after the zoom.
+function zoomImage(zoom, x, y) {
+  const box = $("file-media"), { img } = media, old = img.getBoundingClientRect(), b = box.getBoundingClientRect();
+  const u = (x + b.left - old.left) / (old.width || 1), v = (y + b.top - old.top) / (old.height || 1);
+  media.zoom = Math.min(MAX_ZOOM, Math.max(1, zoom));
+  img.style.width = `${img.naturalWidth * media.fit * media.zoom}px`;
+  img.style.height = `${img.naturalHeight * media.fit * media.zoom}px`;
+  const now = img.getBoundingClientRect();
+  box.scrollLeft += now.left + u * now.width - b.left - x;
+  box.scrollTop += now.top + v * now.height - b.top - y;
+}
+
+const inBox = (x, y) => { const b = $("file-media").getBoundingClientRect(); return [x - b.left, y - b.top]; };
+let mediaPinch = null, lastTap = 0;
+$("file-media").addEventListener("touchstart", (e) => {
+  if (!media) return;
+  if (e.touches.length === 2) {
+    mediaPinch = { gap: fingerGap(e.touches), zoom: media.zoom };
+    lastTap = 0;  // a pinch's first finger is not a tap
+  } else if (e.touches.length === 1) {
+    if (Date.now() - lastTap < 300) {
+      e.preventDefault();
+      zoomImage(media.zoom > 1 ? 1 : 2.5, ...inBox(e.touches[0].clientX, e.touches[0].clientY));
+      lastTap = 0;
+    } else lastTap = Date.now();
+  }
+}, { passive: false });
+$("file-media").addEventListener("touchmove", (e) => {
+  if (!mediaPinch || e.touches.length !== 2) return;
+  e.preventDefault();
+  const [t, u] = e.touches;
+  zoomImage(mediaPinch.zoom * fingerGap(e.touches) / mediaPinch.gap, ...inBox((t.clientX + u.clientX) / 2, (t.clientY + u.clientY) / 2));
+}, { passive: false });
+$("file-media").addEventListener("touchend", (e) => { if (e.touches.length < 2) mediaPinch = null; }, { passive: true });
+// Turning the phone fits the image again.
+window.addEventListener("resize", () => {
+  if (!media || $("file-media").classList.contains("hidden")) return;
+  const box = $("file-media"), { img } = media;
+  media.fit = Math.min(1, box.clientWidth / img.naturalWidth, box.clientHeight / img.naturalHeight);
+  zoomImage(media.zoom, box.clientWidth / 2, box.clientHeight / 2);
+});
 
 // A theme colors the terminal's 16 colors and the page around it. It is kept in this browser, like the font size.
 // Each is: background, foreground, selection, then colors 0-15. Colors are from Ghostty's themes, the Cursor ones
@@ -1026,11 +1176,39 @@ $("themes-back").addEventListener("click", () => {
 setTheme(theme);
 
 // iOS drops the connection while the app is in the background; reconnect at once on return.
+// Even an open one, so tmux zooms the pane again if the Mac unzoomed it meanwhile.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && socket && socket.readyState !== WebSocket.OPEN) connect();
+  if (document.hidden) return;
+  if (socket) connect();
+  loadPanes();
 });
 
 // The poll also runs in the pane view, to see a new version.
+// Push: a new "for you" file wakes the service worker, which shows a notification. iOS allows it only on the
+// home-screen app, and asks for permission only on a tap, so [notify] shows until it is granted.
+async function subscribePush() {
+  const reg = await navigator.serviceWorker.register("/sw.js");
+  const { key } = await getJSON("/api/push/key");
+  const raw = Uint8Array.from(atob(key.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+  const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: raw });
+  await post("/api/push/subscribe", { subscription: sub.toJSON() });
+}
+
+if ("serviceWorker" in navigator && "PushManager" in window && "Notification" in window) {
+  if (Notification.permission === "granted") subscribePush().catch(() => $("notify").classList.remove("hidden"));
+  else if (Notification.permission === "default") $("notify").classList.remove("hidden");
+}
+$("notify").addEventListener("click", async () => {
+  if (await Notification.requestPermission() !== "granted") return toast("Notifications not allowed. Turn them on in Settings.");
+  try { await subscribePush(); $("notify").classList.add("hidden"); toast("Notifications on"); }
+  catch { toast("Couldn't turn on notifications. Tap [notify] to try again."); }
+});
+
+// A tapped notification opens the app at /#for-you=<path>.
+const opened = new URLSearchParams(location.hash.slice(1)).get("for-you");
+if (opened) { history.replaceState(null, "", "/"); openForYou(opened); }
+navigator.serviceWorker?.addEventListener("message", (e) => { if (e.data?.forYou) openForYou(e.data.forYou); });
+
 setInterval(() => { if (!document.hidden) loadPanes(true); }, 3000);
 loadPanes();
 document.body.style.setProperty("--font-size", `${term.options.fontSize}px`);

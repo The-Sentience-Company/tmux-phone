@@ -7,13 +7,17 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
 import unicodedata
+import urllib.error
+import urllib.request
 import uuid
 from http.client import HTTPConnection
 from contextlib import contextmanager
@@ -33,9 +37,15 @@ SERVER_SOURCE = Path(__file__).read_bytes()  # a change to this file needs a res
 # The terminal library, web app manifest and icons the page loads; only these paths are served.
 STATIC_FILES = {"/vendor/xterm.js": "text/javascript; charset=utf-8", "/vendor/xterm.css": "text/css; charset=utf-8",
                 "/vendor/addon-fit.js": "text/javascript; charset=utf-8", "/vendor/codemirror.js": "text/javascript; charset=utf-8",
-                "/manifest.json": "application/manifest+json", "/icon-180.png": "image/png", "/icon-512.png": "image/png"}
+                "/manifest.json": "application/manifest+json", "/sw.js": "text/javascript; charset=utf-8", "/icon-180.png": "image/png", "/icon-512.png": "image/png"}
 MAX_BODY = 64 * 1024
 MAX_FILE = 2 * 1024 * 1024  # bigger files are not shown on the phone
+# Files the phone shows as an image, video or PDF instead of text, by extension, with the Content-Type they are sent with.
+MEDIA = {".png": ("image", "image/png"), ".jpg": ("image", "image/jpeg"), ".jpeg": ("image", "image/jpeg"),
+         ".gif": ("image", "image/gif"), ".webp": ("image", "image/webp"), ".heic": ("image", "image/jpeg"),
+         ".heif": ("image", "image/jpeg"), ".mp4": ("video", "video/mp4"), ".mov": ("video", "video/quicktime"),
+         ".m4v": ("video", "video/x-m4v"), ".pdf": ("pdf", "application/pdf")}
+RAW_CHUNK = 256 * 1024
 MAX_AUDIO = 25 * 1024 * 1024
 MAX_IMAGES = 20 * 1024 * 1024  # all images in one paste, before base64
 UPLOADS = STATE / "uploads"
@@ -43,8 +53,15 @@ UPLOAD_DAYS = 7
 IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg", b"GIF87a": "gif", b"GIF89a": "gif"}
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 WHISPER_HOST, WHISPER_PORT = "127.0.0.1", int(os.environ.get("TMUX_PHONE_WHISPER_PORT", "8767"))
+# Dictation is on if install.sh found whisper-cpp and ffmpeg and downloaded the model; otherwise the page hides the mic.
+DICTATION = WHISPER_MODEL.exists() and bool(shutil.which("whisper-server")) and bool(shutil.which("ffmpeg"))
+# Agents drop screenshots, videos and docs for Ahmet here; the list shows them on top and a new one sends a push.
+FOR_YOU = Path.home() / "notes/sentience/agent-comapny/for-ahmet"
+FOR_YOU_SEEN = STATE / "for-you-seen.json"  # file name -> the mtime it had when opened
+PUSH_SUBSCRIPTIONS = STATE / "push-subscriptions.json"
+VAPID_KEY = STATE / "vapid.pem"
 
-PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|back|paste|key|close|rename)$")
+PANE_ROUTE = re.compile(r"^/api/panes/(\d+)/(open|split|paste|key|close|rename)$")
 WINDOW_ROUTE = re.compile(r"^/api/windows/(\d+)/(rename|panes|close)$")  # by window id: 3 is tmux's @3
 SESSION_ROUTE = re.compile(r"^/api/sessions/(\d+)/(switch|rename|close)$")  # by session id: 3 is tmux's $3
 MAX_NAME = 100
@@ -155,6 +172,57 @@ def ensure_viewer():
         return fix_viewer()
 
 
+# A window has one size and one layout, shared by the Mac and the phone. When the phone shows a window, tmux shrinks
+# it to the phone's size and squeezes every pane; growing it back does not bring the old pane sizes back. So the Mac's
+# layout, active pane and zoom are kept in window options just before the phone can shrink the window. When the phone
+# shrinks it, @phone_shrunk is set; when a Mac client resizes it after that, the kept layout is put back.
+SAVE_LAYOUT = ("set -wF @phone_layout '#{window_layout}' ; set -wF @phone_active '#{pane_id}' ; "
+               "set -wF @phone_zoomed '#{window_zoomed_flag}'")
+LAYOUT_OPTIONS = ("@phone_layout", "@phone_active", "@phone_zoomed", "@phone_shrunk")
+HOOK = 42  # the index of our hooks in tmux's hook arrays, so we don't replace hooks of the user's own
+# The phone shows one pane: zoom its pane in a split window, unless [desktop panes] set @phone_split on the window.
+ZOOM = (f"if -F '#{{&&:#{{==:#{{session_name}},{VIEWER}}},#{{&&:#{{!=:#{{window_panes}},1}},"
+        f"#{{&&:#{{!=:#{{window_zoomed_flag}},1}},#{{!=:#{{@phone_split}},1}}}}}}}}' {{ resize-pane -Z }}")
+
+
+def set_layout_hooks():
+    """tmux runs client-active when a client types after another client did, before the window is resized: the last
+    moment the window still has the Mac's size. By then open_pane has saved the window with the Mac's zoom, so a
+    saved window is not saved again. window-resized runs for each window that changed size."""
+    tmux("set-hook", "-g", f"client-active[{HOOK}]",
+         f"if -F '#{{&&:#{{==:#{{client_session}},{VIEWER}}},#{{==:#{{@phone_layout}},}}}}' {{ {SAVE_LAYOUT} }}")
+    tmux("set-hook", "-g", f"window-resized[{HOOK}]",
+         f"if -F '#{{==:#{{client_session}},{VIEWER}}}' {{ set -w @phone_shrunk 1 }} "
+         f"{{ if -F '#{{@phone_shrunk}}' "
+         f"{{ run-shell -b \"'{sys.executable}' '{Path(__file__).resolve()}' restore '#{{window_id}}'\" }} }}")
+    # Runs after the save above, so the Mac's own zoom is what gets saved. Coming back to the phone resets the toggle.
+    tmux("set-hook", "-g", f"client-active[{HOOK + 1}]", ZOOM)
+    tmux("set-hook", "-g", f"session-window-changed[{HOOK + 1}]", ZOOM)
+    tmux("set-hook", "-g", f"client-attached[{HOOK + 1}]",
+         f"if -F '#{{==:#{{session_name}},{VIEWER}}}' {{ set -wu @phone_split }} ; {ZOOM}")
+
+
+def save_desktop_layout(window):
+    """For when tmux runs no client-active: the phone attaching, and the phone switching to a window while it is
+    already the active client. A window the phone has not shrunk is saved again, as the Mac may have changed it
+    since an earlier save."""
+    if pane_info(window, "@phone_shrunk") == [""]:
+        values = pane_info(window, "window_layout", "pane_id", "window_zoomed_flag")
+        for option, value in zip(LAYOUT_OPTIONS, values):
+            tmux("set-option", "-w", "-t", window, option, value)
+
+
+def restore_desktop_layout(window):
+    """Put back the Mac's pane sizes, active pane and zoom. Fails if a pane was added or closed since the save."""
+    layout, active, zoomed = pane_info(window, *LAYOUT_OPTIONS[:3])
+    for option in LAYOUT_OPTIONS:
+        tmux("set-option", "-wu", "-t", window, option)
+    tmux("select-layout", "-t", window, layout)  # unzooms first
+    tmux("select-pane", "-t", active)
+    if zoomed == "1":
+        tmux("resize-pane", "-Z", "-t", active)
+
+
 def kill_old_viewer():
     """Before _phone, the viewer was named phone. Kill it if it is grouped with a real session: it only showed that
     session's windows. A phone session standing alone, or grouped only with _phone, holds real work and stays."""
@@ -261,7 +329,10 @@ def open_pane(pane):
     """Show one pane full screen on the phone: switch the phone's session to it, and zoom it if its window is split.
     The window is named through the viewer; a bare %pane could pick the Mac's session and switch the Mac."""
     ensure_viewer()
-    tmux("select-window", "-t", f"={VIEWER}:{pane_info(pane, 'window_id')[0]}")
+    window = pane_info(pane, "window_id")[0]
+    save_desktop_layout(window)
+    tmux("set-option", "-wu", "-t", window, "@phone_split")
+    tmux("select-window", "-t", f"={VIEWER}:{window}")
     tmux("select-pane", "-t", pane)
     panes, zoomed = pane_info(pane, "window_panes", "window_zoomed_flag")
     if panes != "1" and zoomed == "0":
@@ -337,9 +408,15 @@ def version(page):
     return hashlib.sha1(SERVER_SOURCE + page).hexdigest()[:12]
 
 
-def unzoom(pane):
-    if pane_info(pane, "window_zoomed_flag") == ["1"]:
+def toggle_split(pane):
+    """[desktop panes] shows the window split as on the Mac; [one pane] zooms the pane again. Returns True if split."""
+    window = pane_info(pane, "window_id")[0]
+    split = pane_info(window, "@phone_split") != ["1"]
+    tmux("set-option", "-w", "-t", window, "@phone_split", "1" if split else "0")
+    panes, zoomed = pane_info(pane, "window_panes", "window_zoomed_flag")
+    if panes != "1" and zoomed == ("1" if split else "0"):
         tmux("resize-pane", "-Z", "-t", pane)
+    return split
 
 
 # The file screen: folders and text files on the Mac, read and written as UTF-8.
@@ -364,10 +441,13 @@ def list_folder(path):
 
 
 def read_file(path):
-    """The file's text and its mtime, or a one-line note instead of text for a big, binary or non-UTF-8 file.
+    """The file's text and its mtime; for an image, video or PDF its kind, which the page loads from /api/raw;
+    or a one-line note instead of text for a big, binary or non-UTF-8 file.
     The mtime is a string: nanoseconds don't fit in a JavaScript number."""
     st = os.stat(path)
     out = {"path": path, "mtime": str(st.st_mtime_ns)}
+    if Path(path).suffix.lower() in MEDIA:
+        return {**out, "media": MEDIA[Path(path).suffix.lower()][0]}
     if st.st_size > MAX_FILE:
         return {**out, "note": f"too big to show: {st.st_size / 1024 / 1024:.1f} MB"}
     data = Path(path).read_bytes()
@@ -377,6 +457,22 @@ def read_file(path):
         return {**out, "text": data.decode("utf-8")}
     except UnicodeDecodeError as e:
         return {**out, "note": f"not UTF-8, not shown: {e}"}
+
+
+def byte_range(header, size):
+    """The (start, end) a `Range: bytes=...` header asks for, end included; None for no header; ValueError if unusable."""
+    if not header:
+        return None
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip())
+    if not m or m[1] == m[2] == "":
+        raise ValueError(header)
+    if m[1] == "":
+        start, end = max(size - int(m[2]), 0), size - 1  # bytes=-500 is the last 500 bytes
+    else:
+        start, end = int(m[1]), min(int(m[2]), size - 1) if m[2] else size - 1
+    if start > end:
+        raise ValueError(header)
+    return start, end
 
 
 def write_file(path, text, mtime):
@@ -434,6 +530,146 @@ def reload_in_nvim(path):
             pass
 
 
+def read_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+
+def write_json(path, value):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(value))
+    tmp.replace(path)
+
+
+def for_you():
+    """The files in FOR_YOU, newest first. A file is seen once opened, until it changes again."""
+    seen = read_json(FOR_YOU_SEEN, {})
+    try:
+        entries = [e for e in os.scandir(FOR_YOU) if e.is_file() and not e.name.startswith(".")]
+    except FileNotFoundError:
+        return []
+    items = [{"name": e.name, "path": e.path, "mtime": str(e.stat().st_mtime_ns)} for e in entries]
+    items.sort(key=lambda i: int(i["mtime"]), reverse=True)
+    return [{**i, "seen": seen.get(i["name"]) == i["mtime"]} for i in items]
+
+
+def mark_seen(path):
+    if Path(path).parent != FOR_YOU:
+        return
+    seen = {i["name"]: i["mtime"] for i in for_you() if i["seen"]}  # drops files that are gone
+    seen[Path(path).name] = str(os.stat(path).st_mtime_ns)
+    write_json(FOR_YOU_SEEN, seen)
+
+
+def delete_for_you(path):
+    """Deletes a file in FOR_YOU; any other path is refused."""
+    if Path(path).parent != FOR_YOU:
+        raise ValueError("not a for-you file")
+    Path(path).unlink(missing_ok=True)
+
+
+def b64url(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def openssl(*args, stdin=None):
+    return subprocess.run(["openssl", *args], input=stdin, capture_output=True, check=True, timeout=10).stdout
+
+
+def vapid_public_key():
+    """The server's Web Push key, made on first use: the raw P-256 point the browser subscribes with."""
+    if not VAPID_KEY.exists():
+        openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(VAPID_KEY))
+    return b64url(openssl("ec", "-in", str(VAPID_KEY), "-pubout", "-outform", "DER")[-65:])
+
+
+def vapid_token(endpoint):
+    """An ES256 JWT for the push service at endpoint, signed with the server's key (RFC 8292)."""
+    url = urlsplit(endpoint)
+    claims = {"aud": f"{url.scheme}://{url.netloc}", "exp": int(time.time()) + 12 * 3600, "sub": "https://github.com/The-Sentience-Company/tmux-phone"}
+    signing_input = f"{b64url(json.dumps({'typ': 'JWT', 'alg': 'ES256'}).encode())}.{b64url(json.dumps(claims).encode())}"
+    der = openssl("dgst", "-sha256", "-sign", str(VAPID_KEY), stdin=signing_input.encode())
+    # openssl gives a DER sequence of two integers; JWT wants them as 32 bytes each.
+    r_len = der[3]
+    r, s = der[4:4 + r_len], der[6 + r_len:]
+    return f"{signing_input}.{b64url(int.from_bytes(r, 'big').to_bytes(32, 'big') + int.from_bytes(s, 'big').to_bytes(32, 'big'))}"
+
+
+def add_push_subscription(sub):
+    subs = [s for s in read_json(PUSH_SUBSCRIPTIONS, []) if s["endpoint"] != sub["endpoint"]]
+    write_json(PUSH_SUBSCRIPTIONS, subs + [sub])
+
+
+def send_push():
+    """Wakes each subscribed browser with an empty push; its service worker asks /api/for-you what is new.
+    A subscription the push service no longer knows (404 or 410) is dropped."""
+    key = vapid_public_key()
+    gone = set()
+    for sub in read_json(PUSH_SUBSCRIPTIONS, []):
+        req = urllib.request.Request(sub["endpoint"], data=b"", method="POST", headers={
+            "TTL": "86400", "Urgency": "high", "Authorization": f"vapid t={vapid_token(sub['endpoint'])}, k={key}"})
+        try:
+            urllib.request.urlopen(req, timeout=15).close()
+        except urllib.error.HTTPError as e:
+            print(f"push to {urlsplit(sub['endpoint']).netloc} failed: {e.code} {e.read()[:200]!r}", flush=True)
+            if e.code in (404, 410):
+                gone.add(sub["endpoint"])
+        except OSError as e:
+            print(f"push to {urlsplit(sub['endpoint']).netloc} failed: {e}", flush=True)
+    if gone:
+        write_json(PUSH_SUBSCRIPTIONS, [s for s in read_json(PUSH_SUBSCRIPTIONS, []) if s["endpoint"] not in gone])
+
+
+def notify_mac(name):
+    """A macOS notification from Ghostty (OSC 777), written to each Ghostty tmux client's terminal; a click focuses Ghostty."""
+    for line in tmux("list-clients", "-F", "#{client_termname} #{client_tty}").splitlines():
+        term, _, tty = line.partition(" ")
+        if term == "xterm-ghostty":
+            try:
+                Path(tty).write_text(f"\x1b]777;notify;for you;{name.replace(';', ' ')}\x1b\\")
+            except OSError:
+                pass
+
+
+def watch_for_you():
+    """Sends one push for each new file name in FOR_YOU, once it has stopped changing for 2 s (a big copy is done)."""
+    known = {i["name"] for i in for_you()}
+    while True:
+        time.sleep(3)
+        items = for_you()
+        settled = [i for i in items if i["name"] not in known and time.time() - int(i["mtime"]) / 1e9 > 2]
+        if settled:
+            known |= {i["name"] for i in settled}
+            send_push()
+            for i in settled:
+                notify_mac(i["name"])
+        known &= {i["name"] for i in items}
+
+
+def for_you_popup(args):
+    """What the tmux key runs in a popup: the for-you files in fzf, newest first; Enter opens one with peek.
+    fzf calls back `for-you list` to fill and refresh the list, `for-you open <path>` and `for-you delete <path>`."""
+    if args[:1] == ["list"]:
+        for i in for_you():
+            print(f"{i['path']}\t{'new ' if not i['seen'] else '    '} {i['name']}")
+        return
+    if args[:1] == ["delete"]:
+        answer = input(f"Delete {Path(args[1]).name}? The file is deleted from the Mac. [y/N] ")
+        if answer.strip().lower() == "y":
+            delete_for_you(args[1])
+        return
+    if args[:1] == ["open"]:
+        mark_seen(args[1])
+        subprocess.run(["peek", args[1]])
+        return
+    me = f"{sys.executable} {Path(__file__).resolve()} for-you"
+    subprocess.run(["fzf", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--header", "files agents left for you, newest first · enter opens · ctrl-x deletes · esc closes",
+                    "--bind", f"start:reload({me} list)", "--bind", f"enter:execute({me} open {{1}})+reload({me} list)",
+                    "--bind", f"ctrl-x:execute({me} delete {{1}})+reload({me} list)"])
+
+
 class Handler(BaseHTTPRequestHandler):
     def reply(self, status_code, body, content_type="application/json"):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -444,6 +680,49 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(data)
+
+    def send_media(self, path):
+        """An image, video or PDF's bytes, or the byte range asked for: iOS Safari plays a video only with ranges.
+        SAMEORIGIN, not DENY, so the page can show a PDF in an iframe."""
+        kind = MEDIA.get(Path(path).suffix.lower())
+        if not kind:
+            return self.reply(415, {"error": "not an image, video or PDF"})
+        if Path(path).suffix.lower() in (".heic", ".heif"):
+            # Only Safari shows HEIC, so the Mac's sips sends it as a JPEG.
+            with tempfile.TemporaryDirectory() as d:
+                jpeg = os.path.join(d, "image.jpg")
+                subprocess.run(["sips", "-s", "format", "jpeg", path, "--out", jpeg], capture_output=True, check=True, timeout=30)
+                return self.send_media_bytes(jpeg, kind[1])
+        self.send_media_bytes(path, kind[1])
+
+    def send_media_bytes(self, path, content_type):
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            try:
+                asked = byte_range(self.headers.get("Range"), size)
+            except ValueError:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                return self.end_headers()
+            start, end = asked or (0, size - 1)
+            self.send_response(206 if asked else 200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Accept-Ranges", "bytes")
+            if asked:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "SAMEORIGIN")
+            self.end_headers()
+            f.seek(start)
+            left = end - start + 1
+            while left > 0:
+                chunk = f.read(min(RAW_CHUNK, left))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                left -= len(chunk)
 
     def allowed(self, needs_origin):
         login = self.headers.get("Tailscale-User-Login")
@@ -468,17 +747,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, page.replace(b"{{VERSION}}", version(page).encode()), "text/html; charset=utf-8")
             if self.path in STATIC_FILES:
                 return self.reply(200, (STATIC / self.path.lstrip("/")).read_bytes(), STATIC_FILES[self.path])
+            if self.path == "/api/for-you":
+                return self.reply(200, {"items": for_you()})
+            if self.path == "/api/push/key":
+                return self.reply(200, {"key": vapid_public_key()})
             if self.path == "/api/panes":
                 target = ensure_viewer()
                 panes = list_panes()
-                return self.reply(200, {"panes": panes, "sessions": sessions_for_phone(target),
-                                        "version": version(INDEX.read_bytes())})
+                # The pane the phone's terminal shows. The Mac can change it, as a window's active pane is shared.
+                shown = tmux("display-message", "-p", "-t", f"={VIEWER}:", "#{pane_id}").strip().lstrip("%")
+                return self.reply(200, {"panes": panes, "shown": shown, "sessions": sessions_for_phone(target), "for_you": for_you(),
+                                        "version": version(INDEX.read_bytes()), "dictation": DICTATION})
             url = urlsplit(self.path)
-            if url.path in ("/api/files", "/api/file"):
+            if url.path in ("/api/files", "/api/file", "/api/raw"):
                 query = {k: v[0] for k, v in parse_qs(url.query).items()}
                 pane = f"%{query['pane']}" if query.get("pane", "").isdigit() else None
                 if url.path == "/api/file":
-                    return self.reply(200, read_file(full_path(query.get("path"), pane)))
+                    path = full_path(query.get("path"), pane)
+                    mark_seen(path)
+                    return self.reply(200, read_file(path))
+                if url.path == "/api/raw":
+                    return self.send_media(full_path(query.get("path"), pane))
                 # With no path, the pane's folder, and the file open in the pane's nvim if there is one.
                 folder = list_folder(full_path(query.get("path"), pane))
                 return self.reply(200, folder if query.get("path") else {**folder, "nvim_file": pane and nvim_file(pane)})
@@ -522,6 +811,20 @@ class Handler(BaseHTTPRequestHandler):
                 if new_mtime is None:
                     return self.reply(409, {"error": "Not saved: the file changed on disk after you opened it. Go back and open it again."})
                 return self.reply(200, {"mtime": new_mtime})
+            if self.path == "/api/for-you/delete":
+                if not isinstance(body.get("path"), str):
+                    return self.reply(400, {"error": "bad path"})
+                try:
+                    delete_for_you(body["path"])
+                except ValueError as e:
+                    return self.reply(400, {"error": str(e)})
+                return self.reply(200, {})
+            if self.path == "/api/push/subscribe":
+                sub = body.get("subscription") or {}
+                if not (isinstance(sub.get("endpoint"), str) and sub["endpoint"].startswith("https://")):
+                    return self.reply(400, {"error": "bad subscription"})
+                add_push_subscription({"endpoint": sub["endpoint"]})
+                return self.reply(200, {})
             if self.path == "/api/windows":
                 ensure_viewer()  # the new window joins the group, so the Mac has it too
                 return self.reply(200, {"pane": tmux("new-window", "-t", f"={VIEWER}:", "-P", "-F", "#{pane_id}").strip().lstrip("%")})
@@ -552,8 +855,8 @@ class Handler(BaseHTTPRequestHandler):
             pane, action = f"%{m[1]}", m[2]
             if action == "open":
                 return self.reply(200, {"ok": True, "border": open_pane(pane)})
-            elif action == "back":
-                unzoom(pane)
+            elif action == "split":
+                return self.reply(200, {"split": toggle_split(pane)})
             elif action == "paste":
                 # Dictated text or photos go into the pane's input; the phone's Enter key submits it.
                 text, images = body.get("text", ""), body.get("images") or []
@@ -678,13 +981,24 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["attach"]:
         # What ttyd runs for each terminal connection: attach to the viewer, made again if it is gone.
         ensure_viewer()
+        set_layout_hooks()
+        save_desktop_layout(pane_info(f"={VIEWER}:", "window_id")[0])
         os.execvp("tmux", ["tmux", "attach", "-t", f"={VIEWER}"])
+    if sys.argv[1:2] == ["restore"]:
+        # What the window-resized hook runs: tmux-phone restore @3
+        restore_desktop_layout(sys.argv[2])
+        sys.exit()
+    if sys.argv[1:2] == ["for-you"]:
+        for_you_popup(sys.argv[2:])
+        sys.exit()
     if not (PUBLIC_ORIGIN and ALLOWED_LOGIN):
         sys.exit("TMUX_PHONE_ORIGIN and TMUX_PHONE_LOGIN must be set; run ./install.sh")
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     kill_old_viewer()
     start_ttyd()
-    start_whisper()
+    if DICTATION:
+        start_whisper()
     keep_awake()
+    threading.Thread(target=watch_for_you, daemon=True).start()
     print(f"tmux-phone on http://{HOST}:{PORT} for {ALLOWED_LOGIN} at {PUBLIC_ORIGIN}", flush=True)
     Server((HOST, PORT), Handler).serve_forever()

@@ -187,6 +187,22 @@ async function pinchOut(page, px, selector = ".xterm") {
   }, [px, selector]);
 }
 
+// Two quick taps in the middle of an element, faster than page.tap can do them.
+async function doubleTap(page, selector) {
+  await page.evaluate(async (selector) => {
+    const box = document.querySelector(selector).getBoundingClientRect();
+    const x = box.left + box.width / 2, y = box.top + box.height / 2, target = document.elementFromPoint(x, y);
+    for (let i = 0; i < 2; i++) {
+      const t = document.createTouch(window, target, 1, x, y, x, y);
+      const fire = (type, touches) => target.dispatchEvent(new TouchEvent(type, { touches: document.createTouchList(...touches),
+        changedTouches: document.createTouchList(t), bubbles: true, cancelable: true, composed: true }));
+      fire("touchstart", [t]);
+      fire("touchend", []);
+      await new Promise((r) => setTimeout(r, 80));
+    }
+  }, selector);
+}
+
 async function main() {
   assert(fs.existsSync(MODEL), `whisper model missing at ${MODEL}; run ./install.sh once`);
   fs.symlinkSync(MODEL, path.join(state, "models/ggml-large-v3-turbo-q5_0.bin"));
@@ -342,6 +358,19 @@ async function main() {
       tmux("send-keys", "-t", pane, `echo ${marker}`, "Enter");
       await waitFor(async () => (await screenText(page)).includes(`\n${marker}`), 10000, `'${marker}' in the terminal`);
       assert(!(await page.evaluate(() => window.__sawReconnectPrompt)), `the page showed "${RECONNECT_PROMPT}"`);
+    });
+
+    await check("without the speech model the mic is hidden, and with it the mic shows", async () => {
+      const link = path.join(state, "models/ggml-large-v3-turbo-q5_0.bin");
+      assert(await page.isVisible("#mic"), "the mic is hidden while dictation is on");
+      await stopServer();
+      fs.unlinkSync(link);
+      await startServer(port, whisperPort);
+      await waitFor(async () => !(await page.isVisible("#mic")), 10000, "the mic to hide");
+      await stopServer();
+      fs.symlinkSync(MODEL, link);
+      await startServer(port, whisperPort);
+      await waitFor(() => page.isVisible("#mic"), 10000, "the mic to show again");
     });
 
     await check("tapping a key bar button keeps the keyboard on the terminal", async () => {
@@ -501,7 +530,7 @@ async function main() {
       tmux("send-keys", "-t", pane, `cd '${proj}'; clear`, "Enter");
       await waitFor(() => paneInfo(pane, "pane_current_path") === proj, 5000, `the pane in ${proj} (is ${paneInfo(pane, "pane_current_path")})`);
       const labels = await page.evaluate(() => [...document.querySelectorAll("#pane-header button")].map((b) => b.textContent));
-      assert(JSON.stringify(labels) === JSON.stringify(["‹ Panes", "files", "Close"]), `pane header buttons: ${labels}`);
+      assert(JSON.stringify(labels) === JSON.stringify(["‹ Panes", "desktop panes", "files", "Close"]), `pane header buttons: ${labels}`);
       await page.tap("#files-open");
       await page.waitForSelector("#files:not(.hidden) #folder .entry");
       const got = await entryLabels(), want = ["..", "sub/", ".hidden", "a.txt", "b.py", "Big.log", "nul.dat"];
@@ -625,6 +654,78 @@ async function main() {
       await page.waitForSelector('#file-note:not(.hidden):has-text("binary")');
       await page.tap("#files-back");
       await page.waitForSelector('#folder:not(.hidden) .entry:text-is("b.py")');
+      await page.tap("#files-back");
+      await page.waitForSelector("#pane:not(.hidden)");
+    });
+
+    // A 400x800 image, a one-second video, a one-page PDF and a HEIC photo, made with the Mac's own tools.
+    const media = path.join(proj, "media");
+    fs.mkdirSync(media);
+    fs.writeFileSync(path.join(media, "dot.png"), Buffer.from(PNG_B64, "base64"));
+    execFileSync("sips", ["-z", "800", "400", path.join(media, "dot.png"), "--out", path.join(media, "shot.png")], { stdio: "ignore" });
+    execFileSync("sips", ["-s", "format", "heic", path.join(media, "shot.png"), "--out", path.join(media, "photo.heic")], { stdio: "ignore" });
+    execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10", "-t", "1", "-pix_fmt", "yuv420p",
+                            "-movflags", "+faststart", path.join(media, "clip.mp4")]);
+    fs.writeFileSync(path.join(media, "doc.pdf"), "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n" +
+      "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n" +
+      "trailer<</Root 1 0 R>>\n%%EOF\n");
+    const raw = (file, headers = {}) => fetch(`http://127.0.0.1:${port}/api/raw?path=${encodeURIComponent(path.join(media, file))}`,
+                                              { headers: { "Tailscale-User-Login": LOGIN, ...headers } });
+
+    await check("an image opens fitted to the screen; pinch zooms it so it scrolls; double-tap fits it again", async () => {
+      await page.tap("#files-open");
+      await tapEntry("media/");
+      await tapEntry("shot.png");
+      await page.waitForFunction(() => document.querySelector("#file-media img")?.complete && media);
+      const look = () => page.evaluate(() => {
+        const box = $("file-media"), img = box.querySelector("img").getBoundingClientRect(), b = box.getBoundingClientRect();
+        return { w: img.width, h: img.height, boxW: b.width, boxH: b.height, scrollW: box.scrollWidth, title: $("files-title").textContent,
+                 edit: !$("file-edit").classList.contains("hidden") };
+      });
+      const fitted = await look();
+      assert(fitted.title === "shot.png" && !fitted.edit, `header: ${JSON.stringify(fitted)}`);
+      assert(fitted.h <= fitted.boxH + 0.5 && fitted.w <= fitted.boxW + 0.5 && Math.abs(fitted.h / fitted.w - 2) < 0.02,
+             `not fitted: ${JSON.stringify(fitted)}`);
+      await pinchOut(page, 80, "#file-media");
+      const zoomed = await look();
+      assert(zoomed.w > fitted.w * 1.5 && zoomed.scrollW > zoomed.boxW, `pinch did not zoom: ${JSON.stringify(zoomed)}`);
+      await doubleTap(page, "#file-media");
+      await waitFor(async () => Math.abs((await look()).w - fitted.w) < 1, 3000, `the image fitted again after a double-tap (${JSON.stringify(await look())} vs ${JSON.stringify(fitted)}, zoom ${await page.evaluate(() => media.zoom)})`);
+      await page.tap("#files-back");
+    });
+
+    await check("a HEIC photo is sent as a JPEG, so every browser shows it", async () => {
+      const r = await raw("photo.heic");
+      const head = Buffer.from(await r.arrayBuffer()).subarray(0, 3);
+      assert(r.status === 200 && r.headers.get("content-type") === "image/jpeg" && head.equals(Buffer.from([0xff, 0xd8, 0xff])),
+             `got ${r.status} ${r.headers.get("content-type")} ${head.toString("hex")}`);
+      await tapEntry("photo.heic");
+      await page.waitForFunction(() => document.querySelector("#file-media img")?.naturalWidth === 400);
+      await page.tap("#files-back");
+    });
+
+    await check("a video plays inline, loaded in byte ranges", async () => {
+      const r = await raw("clip.mp4", { Range: "bytes=0-9" });
+      assert(r.status === 206 && r.headers.get("content-range") === `bytes 0-9/${fs.statSync(path.join(media, "clip.mp4")).size}` &&
+             (await r.arrayBuffer()).byteLength === 10, `range answer ${r.status} ${r.headers.get("content-range")}`);
+      assert((await raw("clip.mp4", { Range: "bytes=999999999-" })).status === 416, "a range past the end is not 416");
+      await tapEntry("clip.mp4");
+      await page.waitForSelector("#file-media video");
+      const v = await page.evaluate(() => { const v = $("file-media").querySelector("video"); return { inline: v.playsInline, controls: v.controls }; });
+      assert(v.inline && v.controls, `video ${JSON.stringify(v)}`);
+      await page.waitForFunction(() => $("file-media").querySelector("video").readyState >= 1, null, { timeout: 10000 });
+      await page.tap("#files-back");
+      await page.waitForSelector('#folder:not(.hidden) .entry:text-is("clip.mp4")');
+      assert(await page.evaluate(() => !$("file-media").querySelector("video")), "the video is still on the page after [‹ back]");
+    });
+
+    await check("a PDF shows in a frame the server allows", async () => {
+      const r = await raw("doc.pdf");
+      assert(r.headers.get("content-type") === "application/pdf" && r.headers.get("x-frame-options") === "SAMEORIGIN",
+             `${r.headers.get("content-type")} ${r.headers.get("x-frame-options")}`);
+      await tapEntry("doc.pdf");
+      await page.waitForSelector("#file-media:not(.hidden) iframe");
+      await page.tap("#files-back");
       await page.tap("#files-back");
       await page.waitForSelector("#pane:not(.hidden)");
     });
@@ -764,6 +865,28 @@ async function main() {
       assert(tmux("display-message", "-p", "-t", "test", "#{pane_id}").trim() === `%${added}`, "tmux's active pane is not the new one");
     });
 
+    await check("a pane in a split window opens zoomed; [desktop panes] shows the split, [one pane] zooms back", async () => {
+      const zoomed = () => paneInfo(`%${added}`, "window_zoomed_flag");
+      assert(zoomed() === "1", "the new pane is not zoomed");
+      await page.tap("#split");
+      await waitFor(async () => zoomed() === "0" && await page.textContent("#split") === "one pane", 5000, "the split view");
+      await page.tap("#split");
+      await waitFor(async () => zoomed() === "1" && await page.textContent("#split") === "desktop panes", 5000, "one pane again");
+    });
+
+    await check("Close names the pane the terminal shows, not the one the phone opened, once the Mac switched panes", async () => {
+      tmux("select-pane", "-t", pane);
+      let message = "";
+      page.once("dialog", (d) => { message = d.message(); d.dismiss(); });
+      await page.tap("#close-pane");
+      await waitFor(() => message, 5000, "the confirm");
+      assert(message.includes("my pane"), `the confirm said: ${JSON.stringify(message)}`);
+      assert(await page.evaluate(() => current) === paneId, "keys would go to the pane the phone opened");
+      const alive = tmux("list-panes", "-a", "-F", "#{pane_id}");
+      assert(alive.includes(pane) && alive.includes(`%${added}`), "a pane closed after cancel");
+      tmux("select-pane", "-t", `%${added}`);
+    });
+
     await check("[x] on a pane closes it after a confirm", async () => {
       assert(added, "no pane was added");
       await page.tap("#back");
@@ -876,6 +999,35 @@ async function main() {
       await page.tap("#files-back");
       await page.tap("#back");
       await page.waitForSelector(`button[data-pane="${paneId}"]`);
+    });
+
+    await check("a file in for-ahmet shows on top of the list as new; opening it marks it seen and back returns to the list; [x] deletes after a confirm", async () => {
+      const forYou = path.join(home, "notes/sentience/agent-comapny/for-ahmet");
+      fs.mkdirSync(forYou, { recursive: true });
+      fs.writeFileSync(path.join(forYou, "older-note.txt"), "older\n");
+      fs.utimesSync(path.join(forYou, "older-note.txt"), 1000, 1000);
+      fs.writeFileSync(path.join(forYou, "build-log.txt"), "the build passed\n");
+      const rows = () => page.evaluate(() => [...document.querySelectorAll("[data-for-you]")].map((b) => b.querySelector(".title").textContent + (b.querySelector(".status")?.textContent || "")));
+      await waitFor(async () => (await rows()).length === 2, 5000, "two for-you rows");
+      assert(JSON.stringify(await rows()) === JSON.stringify(["build-log.txtnew", "older-note.txtnew"]), `rows: ${JSON.stringify(await rows())}`);
+      const first = await page.evaluate(() => document.querySelector("#list-body").firstElementChild.textContent.trim());
+      assert(first === "for you", `the list starts with ${JSON.stringify(first)}`);
+      await page.tap('[data-for-you$="build-log.txt"]');
+      await waitFor(async () => (await fileText()) === "the build passed\n", 5000, "the file's text");
+      await page.tap("#files-back");
+      await page.waitForSelector("#list:not(.hidden)");
+      assert(await page.locator("#files").isHidden(), "the file screen still shows");
+      await waitFor(async () => JSON.stringify(await rows()) === JSON.stringify(["build-log.txt", "older-note.txtnew"]), 5000,
+        `build-log.txt seen (${JSON.stringify(await rows())})`);
+      let message = "";
+      page.once("dialog", (d) => { message = d.message(); d.accept(); });
+      await page.tap('[data-delete-for-you$="older-note.txt"]');
+      await waitFor(async () => JSON.stringify(await rows()) === JSON.stringify(["build-log.txt"]), 5000, `older-note.txt gone (${JSON.stringify(await rows())})`);
+      assert(/^Delete "older-note.txt"\?/.test(message), `the confirm said: ${JSON.stringify(message)}`);
+      assert(!fs.existsSync(path.join(forYou, "older-note.txt")), "the file is still on disk");
+      assert(await page.locator("#list").isVisible(), "[x] opened the file");
+      fs.rmSync(forYou, { recursive: true });
+      await waitFor(async () => (await rows()).length === 0, 5000, "no for-you rows once the folder is gone");
     });
 
     await check("one session: no session row, and _phone is never listed", async () => {
