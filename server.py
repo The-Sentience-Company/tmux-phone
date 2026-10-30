@@ -754,7 +754,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/panes":
                 target = ensure_viewer()
                 panes = list_panes()
-                return self.reply(200, {"panes": panes, "sessions": sessions_for_phone(target), "for_you": for_you(),
+                # The pane the phone's terminal shows. The Mac can change it, as a window's active pane is shared.
+                shown = tmux("display-message", "-p", "-t", f"={VIEWER}:", "#{pane_id}").strip().lstrip("%")
+                return self.reply(200, {"panes": panes, "shown": shown, "sessions": sessions_for_phone(target), "for_you": for_you(),
                                         "version": version(INDEX.read_bytes()), "dictation": DICTATION})
             url = urlsplit(self.path)
             if url.path in ("/api/files", "/api/file", "/api/raw"):

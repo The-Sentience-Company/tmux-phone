@@ -282,6 +282,7 @@ function esc(s) {
 // A poll in edit mode keeps the data but does not redraw, so a tap is never lost to a redraw mid-press.
 async function loadPanes(poll = false) {
   if (renaming) return;
+  const asked = current;
   let fresh;
   try {
     const r = await fetch("/api/panes");
@@ -296,9 +297,15 @@ async function loadPanes(poll = false) {
   forYou = fresh.for_you;
   if (fresh.version !== VERSION) reloadWhenSafe();
   $("mic").style.display = fresh.dictation === false ? "none" : "";
+  for (const p of panes) lastTitle[p.id] = p.title || p.command;
+  // Keys, pastes and Close go to the pane the terminal shows, which the Mac or another phone tab may have changed.
+  // A poll sent before a pane was opened carries the old pane, so only adopt if current did not change meanwhile.
+  if (current && current === asked && fresh.shown && fresh.shown !== current) {
+    current = fresh.shown;
+    $("pane-title").textContent = lastTitle[current] || "";
+  }
   const open = panes.find((p) => p.id === current);
   if (open) hideBorderRow(open.border);
-  for (const p of panes) lastTitle[p.id] = p.title || p.command;
   renderStrip();
   if (!renaming && !(poll && editMode)) renderPanes();
 }
@@ -510,8 +517,12 @@ $("split").addEventListener("click", async () => {
 });
 
 $("close-pane").addEventListener("click", async () => {
-  if (!confirm(`Close "${$("pane-title").textContent}"? Anything running in it stops.`)) return;
-  if (await act(`/api/panes/${current}/close`)) { current = null; showList(); }
+  await loadPanes();
+  const pane = current;
+  if (!pane || !confirm(`Close "${$("pane-title").textContent}"? Anything running in it stops.`)) return;
+  await loadPanes();
+  if (current !== pane) return toast("The phone now shows another pane, so nothing was closed.");
+  if (await act(`/api/panes/${pane}/close`)) { current = null; showList(); }
 });
 
 document.querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click", () => {
@@ -1167,7 +1178,9 @@ setTheme(theme);
 // iOS drops the connection while the app is in the background; reconnect at once on return.
 // Even an open one, so tmux zooms the pane again if the Mac unzoomed it meanwhile.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && socket) connect();
+  if (document.hidden) return;
+  if (socket) connect();
+  loadPanes();
 });
 
 // The poll also runs in the pane view, to see a new version.

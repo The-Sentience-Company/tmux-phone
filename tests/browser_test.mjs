@@ -874,6 +874,19 @@ async function main() {
       await waitFor(async () => zoomed() === "1" && await page.textContent("#split") === "desktop panes", 5000, "one pane again");
     });
 
+    await check("Close names the pane the terminal shows, not the one the phone opened, once the Mac switched panes", async () => {
+      tmux("select-pane", "-t", pane);
+      let message = "";
+      page.once("dialog", (d) => { message = d.message(); d.dismiss(); });
+      await page.tap("#close-pane");
+      await waitFor(() => message, 5000, "the confirm");
+      assert(message.includes("my pane"), `the confirm said: ${JSON.stringify(message)}`);
+      assert(await page.evaluate(() => current) === paneId, "keys would go to the pane the phone opened");
+      const alive = tmux("list-panes", "-a", "-F", "#{pane_id}");
+      assert(alive.includes(pane) && alive.includes(`%${added}`), "a pane closed after cancel");
+      tmux("select-pane", "-t", `%${added}`);
+    });
+
     await check("[x] on a pane closes it after a confirm", async () => {
       assert(added, "no pane was added");
       await page.tap("#back");
