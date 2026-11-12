@@ -50,7 +50,7 @@ SESSION_ROUTE = re.compile(r"^/api/sessions/(\d+)/(switch|rename|close)$")  # by
 MAX_NAME = 100
 # Phone button name -> tmux send-keys name. Digits answer Claude's numbered menus.
 KEYS = {"enter": "Enter", "escape": "Escape", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
-        "tab": "Tab", "shift+tab": "BTab", "ctrl+c": "C-c", "alt+p": "M-p", "1": "1", "2": "2", "3": "3"}
+        "tab": "Tab", "shift+tab": "BTab", "ctrl+c": "C-c", "alt+p": "M-p", "0": "0", "1": "1", "2": "2", "3": "3"}
 PANE_FIELDS = ["pane_id", "window_id", "window_index", "window_name", "pane_index", "pane_title", "pane_tty", "pane_active",
                "window_active", "window_zoomed_flag", "window_panes", "pane_current_command", "mouse_any_flag",
                "pane_top", "pane_height", "window_height", "pane-border-status"]
